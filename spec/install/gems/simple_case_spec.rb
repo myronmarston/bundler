@@ -21,6 +21,14 @@ describe "bundle install with gem sources" do
       should_be_installed("rack 1.0.0")
     end
 
+    it "raises an appropriate error when gems are specified using symbols" do
+      error = install_gemfile(<<-G, :expect_err => true)
+        source "file://#{gem_repo1}"
+        gem :rack
+      G
+      error.should match(/Bundler does not support specifying gems using symbols/)
+    end
+
     it "pulls in dependencies" do
       install_gemfile <<-G
         source "file://#{gem_repo1}"
