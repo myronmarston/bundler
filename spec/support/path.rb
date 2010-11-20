@@ -36,6 +36,20 @@ module Spec
       bundled_app("vendor/bundle/#{Gem.ruby_engine}/#{Gem::ConfigMap[:ruby_version]}/#{path}")
     end
 
+    def find_installed_gem(installed_dir, gem_name)
+      installed_dir = vendored_gems(installed_dir)
+      gem_dir = Dir.new(installed_dir).entries.find { |d| d =~ /^#{Regexp.escape(gem_name)}/ }
+      installed_dir + gem_dir
+    end
+
+    def installed_gem_path_to(gem_name)
+      find_installed_gem("gems", gem_name)
+    end
+
+    def installed_git_gem_path_to(gem_name)
+      find_installed_gem("bundler/gems", gem_name)
+    end
+
     def cached_gem(path)
       bundled_app("vendor/cache/#{path}.gem")
     end
