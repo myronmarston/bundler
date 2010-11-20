@@ -29,6 +29,12 @@ FileUtils.rm_rf(Spec::Path.gem_repo1)
 ENV['RUBYOPT'] = "-I#{Spec::Path.root}/spec/support/rubygems_hax"
 ENV['BUNDLE_SPEC_RUN'] = "true"
 
+$LOAD_PATH.unshift '/Users/mmarston/.rvm/gems/ruby-1.8.7-p302/gems/ruby-debug-0.10.3/cli'
+$LOAD_PATH.unshift '/Users/mmarston/.rvm/gems/ruby-1.8.7-p302/gems/ruby-debug-base-0.10.3/lib'
+$LOAD_PATH.unshift '/Users/mmarston/.rvm/gems/ruby-1.8.7-p302/gems/linecache-0.43/lib'
+$LOAD_PATH.unshift '/Users/mmarston/.rvm/gems/ruby-1.8.7-p302/gems/columnize-0.3.1/lib'
+require 'ruby-debug'
+
 RSpec.configure do |config|
   config.include Spec::Builders
   config.include Spec::Helpers
