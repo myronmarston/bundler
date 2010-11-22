@@ -468,6 +468,13 @@ module Bundler
       end
     end
 
+    desc "pristine", "Restores installed gems to their original state, removing any edits you have made"
+    def pristine
+      cmd = Gem::Commands::PristineCommand.new
+      cmd.options[:args] = %w[ rack ]
+      cmd.execute
+    end
+
   private
 
     def have_groff?

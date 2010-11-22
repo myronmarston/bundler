@@ -92,6 +92,7 @@ module Spec
         @err = @err_p.read_available_bytes.strip
       end
 
+      debugger
       puts @err unless expect_err || @err.empty? || !$show_err
       @out
     end
