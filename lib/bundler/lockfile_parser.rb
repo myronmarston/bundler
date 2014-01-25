@@ -60,18 +60,20 @@ module Bundler
 
     def parse_dependency(line)
       if line =~ %r{^ {2}#{NAME_VERSION}(!)?$}
-        name, version, pinned = $1, $2, $3
+        name, version, pinned = $1, $2, $4
+        version = version.split(",").map { |d| d.strip } if version
 
         dep = Bundler::Dependency.new(name, version)
 
-        if pinned
-          dep.source = @specs.find { |s| s.name == dep.name }.source
+        if pinned && dep.name != 'bundler'
+          spec = @specs.find { |s| s.name == dep.name }
+          dep.source = spec.source if spec
 
           # Path sources need to know what the default name / version
           # to use in the case that there are no gemspecs present. A fake
           # gemspec is created based on the version set on the dependency
           # TODO: Use the version from the spec instead of from the dependency
-          if version =~ /^= (.+)$/ && dep.source.is_a?(Bundler::Source::Path)
+          if version && version.size == 1 && version.first =~ /^= (.+)$/ && dep.source.is_a?(Bundler::Source::Path)
             dep.source.name    = name
             dep.source.version = $1
           end

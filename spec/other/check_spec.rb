@@ -12,7 +12,43 @@ describe "bundle check" do
     out.should == "The Gemfile's dependencies are satisfied"
   end
 
-  it "shows what is missing with the current Gemfile if it is not satisfied" do
+  it "works with the --gemfile flag when not in the directory" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rails"
+    G
+
+    Dir.chdir tmp
+    bundle "check --gemfile bundled_app/Gemfile"
+    out.should == "The Gemfile's dependencies are satisfied"
+  end
+
+  it "creates a Gemfile.lock if one did not exist" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rails"
+    G
+
+    FileUtils.rm("Gemfile.lock")
+
+    bundle "check"
+
+    bundled_app("Gemfile.lock").should exist
+  end
+
+  it "prints a generic error if the missing gems are unresolvable" do
+    system_gems ["rails-2.3.2"]
+
+    gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rails"
+    G
+
+    bundle :check
+    out.should include("Your Gemfile's dependencies could not be satisfied")
+  end
+
+  it "prints a generic error if a Gemfile.lock does not exist and a toplevel dependency does not exist" do
     gemfile <<-G
       source "file://#{gem_repo1}"
       gem "rails"
@@ -20,21 +56,10 @@ describe "bundle check" do
 
     bundle :check, :exit_status => true
     check @exitstatus.should > 0
-    out.should include("rails (>= 0, runtime)")
+    out.should include("could not be satisfied")
   end
 
-  it "shows missing child dependencies" do
-    system_gems "missing_dep-1.0"
-    gemfile <<-G
-      gem "missing_dep"
-    G
-
-    bundle :check
-    out.should include(%{Could not find gem 'not_here'})
-    out.should include(%{required by 'missing_dep'})
-  end
-
-  it "provides debug information when there is a resolving problem" do
+  it "prints a generic message if you changed your lockfile" do
     install_gemfile <<-G
       source "file://#{gem_repo1}"
       gem 'rails'
@@ -51,7 +76,7 @@ describe "bundle check" do
     G
 
     bundle :check
-    out.should include(%{could not find compatible versions for gem "activesupport"})
+    out.should include("Your Gemfile's dependencies could not be satisfied")
   end
 
   it "remembers --without option from install" do

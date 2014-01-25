@@ -143,6 +143,35 @@ describe "Bundler.require" do
       check out.should == "two\nmodule_two\none"
     end
 
+    describe "a gem with different requires for different envs" do
+      before(:each) do
+        build_gem "multi_gem", :to_system => true do |s|
+          s.write "lib/one.rb", "puts 'ONE'"
+          s.write "lib/two.rb", "puts 'TWO'"
+        end
+
+        install_gemfile <<-G
+          gem "multi_gem", :require => "one", :group => :one
+          gem "multi_gem", :require => "two", :group => :two
+        G
+      end
+
+      it "requires both with Bundler.require(both)" do
+        run "Bundler.require(:one, :two)"
+        out.should == "ONE\nTWO"
+      end
+
+      it "requires one with Bundler.require(:one)" do
+        run "Bundler.require(:one)"
+        out.should == "ONE"
+      end
+
+      it "requires :two with Bundler.require(:two)" do
+        run "Bundler.require(:two)"
+        out.should == "TWO"
+      end
+    end
+
     it "fails when the gems are in the Gemfile in the wrong order" do
       gemfile <<-G
         path "#{lib_path}"
@@ -181,5 +210,52 @@ describe "Bundler.require" do
         check out.should == "two_not_loaded\none\ntwo"
       end
     end
+
+    describe "with busted gems" do
+      it "should be busted" do
+        build_gem "busted_require", :to_system => true do |s|
+          s.write "lib/busted_require.rb", "require 'no_such_file_omg'"
+        end
+
+        install_gemfile <<-G
+          gem "busted_require"
+        G
+
+        run "Bundler.require", :expect_err => true
+        err.should include("no such file to load -- no_such_file_omg")
+      end
+    end
+  end
+end
+
+describe "Bundler.require with platform specific dependencies" do
+  it "does not require the gems that are pinned to other platforms" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+
+      platforms :#{not_local_tag} do
+        gem "fail", :require => "omgomg"
+      end
+
+      gem "rack", "1.0.0"
+    G
+
+    run "Bundler.require", :expect_err => true
+    err.should be_empty
+  end
+
+  it "requires gems pinned to multiple platforms, including the current one" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+
+      platforms :#{not_local_tag}, :#{local_tag} do
+        gem "rack", :require => "rack"
+      end
+    G
+
+    run "Bundler.require; puts RACK", :expect_err => true
+
+    out.should == "1.0.0"
+    err.should be_empty
   end
 end

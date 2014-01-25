@@ -22,6 +22,10 @@ module Bundler
       Pathname.new(gemfile)
     end
 
+    def default_lockfile
+      Pathname.new("#{default_gemfile}.lock")
+    end
+
     def in_bundle?
       find_gemfile
     end
@@ -118,8 +122,13 @@ module Bundler
 
       # OMG more hacks
       gem_class = (class << Gem ; self ; end)
+      gem_class.send(:define_method, :refresh) { }
       gem_class.send(:define_method, :bin_path) do |name, *args|
         exec_name, *reqs = args
+
+        if exec_name == 'bundle'
+          return ENV['BUNDLE_BIN_PATH']
+        end
 
         spec = nil
 

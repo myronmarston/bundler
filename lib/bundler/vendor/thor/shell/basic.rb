@@ -35,15 +35,17 @@ class Thor
       # say("I know you knew that.")
       #
       def say(message="", color=nil, force_new_line=(message.to_s !~ /( |\t)$/))
-        message  = message.to_s
-        message  = set_color(message, color) if color
+        message = message.to_s
+        message = set_color(message, color) if color
+
+        spaces = "  " * padding
 
         if force_new_line
-          $stdout.puts(message)
+          $stdout.puts(spaces + message)
         else
-          $stdout.print(message)
-          $stdout.flush
+      $stdout.print(spaces + message)
         end
+        $stdout.flush
       end
 
       # Say a status with the given color and appends the message. Since this
@@ -58,7 +60,9 @@ class Thor
 
         status = status.to_s.rjust(12)
         status = set_color status, color, true if color
-        say "#{status}#{spaces}#{message}", nil, true
+
+        $stdout.puts "#{status}#{spaces}#{message}"
+        $stdout.flush
       end
 
       # Make a question the to user and returns true if the user replies "y" or
@@ -81,16 +85,20 @@ class Thor
       # Array[Array[String, String, ...]]
       #
       # ==== Options
-      # ident<Integer>:: Ident the first column by ident value.
+      # ident<Integer>:: Indent the first column by ident value.
+      # colwidth<Integer>:: Force the first column to colwidth spaces wide.
       #
       def print_table(table, options={})
         return if table.empty?
 
-        formats, ident = [], options[:ident].to_i
+        formats, ident, colwidth = [], options[:ident].to_i, options[:colwidth]
         options[:truncate] = terminal_width if options[:truncate] == true
 
-        0.upto(table.first.length - 2) do |i|
-          maxima = table.max{ |a,b| a[i].size <=> b[i].size }[i].size
+        formats << "%-#{colwidth + 2}s" if colwidth
+        start = colwidth ? 1 : 0
+
+        start.upto(table.first.length - 2) do |i|
+          maxima ||= table.max{|a,b| a[i].size <=> b[i].size }[i].size
           formats << "%-#{maxima + 2}s"
         end
 

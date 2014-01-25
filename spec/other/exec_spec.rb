@@ -97,7 +97,8 @@ describe "bundle exec" do
       gem "rack"
     G
 
-    bundle "exec foobarbaz"
+    bundle "exec foobarbaz", :exit_status => true
+    @exitstatus.should == 127
     out.should include("bundler: command not found: foobarbaz")
     out.should include("Install missing gem binaries with `bundle install`")
   end
@@ -108,7 +109,8 @@ describe "bundle exec" do
     G
 
     bundle "exec touch foo"
-    bundle "exec ./foo"
+    bundle "exec ./foo", :exit_status => true
+    @exitstatus.should == 126
     out.should include("bundler: not executable: ./foo")
   end
 
@@ -206,5 +208,34 @@ describe "bundle exec" do
       end
     end
 
+  end
+
+  describe "bundling bundler" do
+    before(:each) do
+      gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack"
+      G
+
+      bundle "install vendor --disable-shared-gems"
+    end
+
+    it "does not explode with --disable-shared-gems" do
+      bundle "exec bundle check", :exit_status => true
+      exitstatus.should == 0
+    end
+
+    it "does not explode when starting with Bundler.setup" do
+      ruby <<-R
+        require "rubygems"
+        require "bundler"
+        Bundler.setup
+        puts `bundle check`
+        puts $?.exitstatus
+      R
+
+      out.should include("satisfied")
+      out.should include("\n0")
+    end
   end
 end

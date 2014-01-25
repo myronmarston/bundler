@@ -53,7 +53,7 @@ class Thor
 
       opts = Thor::Options.new(parse_options, hash_options)
       self.options = opts.parse(array_options)
-      opts.check_unknown! if self.class.check_unknown_options?
+      opts.check_unknown! if self.class.check_unknown_options?(config)
     end
 
     class << self
@@ -114,8 +114,12 @@ class Thor
         @check_unknown_options = true
       end
 
-      def check_unknown_options? #:nodoc:
-        @check_unknown_options || false
+      def check_unknown_options #:nodoc:
+        @check_unknown_options ||= from_superclass(:check_unknown_options, false)
+      end
+
+      def check_unknown_options?(config) #:nodoc:
+        !!check_unknown_options
       end
 
       # Adds an argument to the class and creates an attr_accessor for it.
@@ -336,6 +340,7 @@ class Thor
       def no_tasks
         @no_tasks = true
         yield
+      ensure
         @no_tasks = false
       end
 
@@ -363,30 +368,40 @@ class Thor
       #
       def namespace(name=nil)
         case name
-          when nil
-            @namespace ||= Thor::Util.namespace_from_thor_class(self)
-          else
-            @namespace = name.to_s
+        when nil
+          @namespace ||= Thor::Util.namespace_from_thor_class(self)
+        else
+          @namespace = name.to_s
         end
       end
 
-      # Default way to start generators from the command line.
+      # Parses the task and options from the given args, instantiate the class
+      # and invoke the task. This method is used when the arguments must be parsed
+      # from an array. If you are inside Ruby and want to use a Thor class, you
+      # can simply initialize it:
+      #
+      #   script = MyScript.new(args, options, config)
+      #   script.invoke(:task, first_arg, second_arg, third_arg)
       #
       def start(given_args=ARGV, config={})
-        self.debugging = given_args.include?("--debug")
+        self.debugging = given_args.delete("--debug")
         config[:shell] ||= Thor::Base.shell.new
-        yield(given_args.dup)
+        dispatch(nil, given_args.dup, nil, config)
       rescue Thor::Error => e
         debugging ? (raise e) : config[:shell].error(e.message)
         exit(1) if exit_on_failure?
       end
 
       def handle_no_task_error(task) #:nodoc:
-        if self.banner_base == "thor"
+        if $thor_runner
           raise UndefinedTaskError, "Could not find task #{task.inspect} in #{namespace.inspect} namespace."
         else
           raise UndefinedTaskError, "Could not find task #{task.inspect}."
         end
+      end
+
+      def handle_argument_error(task, error) #:nodoc:
+        raise InvocationError, "#{task.name.inspect} was called incorrectly. Call as #{self.banner(task).inspect}."
       end
 
       protected
@@ -445,7 +460,7 @@ class Thor
         def build_option(name, options, scope) #:nodoc:
           scope[name] = Thor::Option.new(name, options[:desc], options[:required],
                                                options[:type], options[:default], options[:banner],
-                                               options[:group], options[:aliases])
+                                               options[:lazy_default], options[:group], options[:aliases])
         end
 
         # Receives a hash of options, parse them and add to the scope. This is a
@@ -516,11 +531,6 @@ class Thor
           false
         end
 
-        # Returns the base for banner.
-        def banner_base
-          @banner_base ||= $thor_runner ? "thor" : File.basename($0.split(" ").first)
-        end
-
         # SIGNATURE: Sets the baseclass. This is where the superclass lookup
         # finishes.
         def baseclass #:nodoc:
@@ -535,6 +545,12 @@ class Thor
         # class.
         def initialize_added #:nodoc:
         end
+
+        # SIGNATURE: The hook invoked by start.
+        def dispatch(task, given_args, given_opts, config) #:nodoc:
+          raise NotImplementedError
+        end
+
     end
   end
 end

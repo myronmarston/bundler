@@ -8,8 +8,10 @@ describe "bundle install with git sources" do
       end
 
       install_gemfile <<-G
-        git "#{lib_path('foo-1.0')}"
-        gem 'foo'
+        source "file://#{gem_repo1}"
+        git "#{lib_path('foo-1.0')}" do
+          gem 'foo'
+        end
       G
     end
 
@@ -33,8 +35,9 @@ describe "bundle install with git sources" do
 
       in_app_root2 do
         install_gemfile bundled_app2("Gemfile"), <<-G
-          git "#{lib_path('foo-1.0')}"
-          gem 'foo'
+          git "#{lib_path('foo-1.0')}" do
+            gem 'foo'
+          end
         G
       end
 
@@ -63,6 +66,55 @@ describe "bundle install with git sources" do
 
       out.should include("Source contains 'foo' at: 1.0")
     end
+
+    it "still works after moving the application directory" do
+      bundle "install vendor"
+      FileUtils.mv bundled_app, tmp('bundled_app.bck')
+
+      Dir.chdir tmp('bundled_app.bck')
+      should_be_installed "foo 1.0"
+    end
+
+    it "can still install after moving the application directory" do
+      bundle "install vendor"
+      FileUtils.mv bundled_app, tmp('bundled_app.bck')
+
+      update_git "foo", "1.1", :path => lib_path("foo-1.0")
+
+      Dir.chdir tmp('bundled_app.bck')
+      gemfile tmp('bundled_app.bck/Gemfile'), <<-G
+        source "file://#{gem_repo1}"
+        git "#{lib_path('foo-1.0')}" do
+          gem 'foo'
+        end
+
+        gem "rack", "1.0"
+      G
+
+      bundle "update foo"
+
+      should_be_installed "foo 1.1", "rack 1.0"
+    end
+
+  end
+
+  describe "with an empty git block" do
+    before do
+      build_git "foo"
+      gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack"
+
+        git "#{lib_path("foo-1.0")}" do
+          # this page left intentionally blank
+        end
+      G
+    end
+
+    it "does not explode" do
+      bundle "install"
+      should_be_installed "rack 1.0"
+    end
   end
 
   describe "when specifying a revision" do
@@ -72,8 +124,9 @@ describe "bundle install with git sources" do
       update_git "foo"
 
       install_gemfile <<-G
-        git "#{lib_path('foo-1.0')}", :ref => "#{@revision}"
-        gem "foo"
+        git "#{lib_path('foo-1.0')}", :ref => "#{@revision}" do
+          gem "foo"
+        end
       G
 
       run <<-RUBY
@@ -131,6 +184,38 @@ describe "bundle install with git sources" do
 
       run "require 'rack'"
       out.should == 'WIN OVERRIDE'
+    end
+
+    it "correctly unlocks when changing to a git source" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack", "0.9.1"
+      G
+
+      build_git "rack", :path => lib_path("rack")
+
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack", "1.0.0", :git => "#{lib_path('rack')}"
+      G
+
+      should_be_installed "rack 1.0.0"
+    end
+
+    it "correctly unlocks when changing to a git source without versions" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack"
+      G
+
+      build_git "rack", "1.2", :path => lib_path("rack")
+
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack", :git => "#{lib_path('rack')}"
+      G
+
+      should_be_installed "rack 1.2"
     end
   end
 
@@ -245,7 +330,7 @@ describe "bundle install with git sources" do
 
     bundle :install, :expect_err => true
 
-    out.should include("An error has occurred in git. Cannot complete bundling.")
+    out.should include("An error has occurred in git")
     err.should include("fatal: 'omgomg'")
     err.should include("fatal: The remote end hung up unexpectedly")
   end
@@ -264,8 +349,9 @@ describe "bundle install with git sources" do
     build_git "forced", "1.0"
 
     install_gemfile <<-G
-      git "#{lib_path('forced-1.0')}"
-      gem 'forced'
+      git "#{lib_path('forced-1.0')}" do
+        gem 'forced'
+      end
     G
     should_be_installed "forced 1.0"
 
@@ -295,12 +381,13 @@ describe "bundle install with git sources" do
     end
 
     install_gemfile <<-G, :expect_err => true
-      git "#{lib_path('has_submodule-1.0')}"
-      gem "has_submodule"
+      git "#{lib_path('has_submodule-1.0')}" do
+        gem "has_submodule"
+      end
     G
+    out.should =~ /Could not find gem 'submodule'/
 
     should_not_be_installed "has_submodule 1.0", :expect_err => true
-    err.should =~ /Could not find gem 'submodule'/
   end
 
   it "handles repos with submodules" do
@@ -314,14 +401,15 @@ describe "bundle install with git sources" do
     end
 
     install_gemfile <<-G
-      git "#{lib_path('has_submodule-1.0')}", :submodules => true
-      gem "has_submodule"
+      git "#{lib_path('has_submodule-1.0')}", :submodules => true do
+        gem "has_submodule"
+      end
     G
 
     should_be_installed "has_submodule 1.0"
   end
 
-  it "handles implicity updates when modifying the source info" do
+  it "handles implicit updates when modifying the source info" do
     git = build_git "foo"
 
     install_gemfile <<-G
@@ -347,4 +435,101 @@ describe "bundle install with git sources" do
     out.should == "WIN"
   end
 
+  it "does not to a remote fetch if the revision is cached locally" do
+    build_git "foo"
+
+    install_gemfile <<-G
+      gem "foo", :git => "#{lib_path('foo-1.0')}"
+    G
+
+    FileUtils.rm_rf(lib_path('foo-1.0'))
+
+    bundle "install"
+    out.should_not =~ /updating/i
+  end
+
+  it "doesn't blow up if bundle install is run twice in a row" do
+    build_git "foo"
+
+    gemfile <<-G
+      gem "foo", :git => "#{lib_path('foo-1.0')}"
+    G
+
+    bundle "install"
+    bundle "install", :exit_status => true
+    exitstatus.should == 0
+  end
+
+  describe "switching sources" do
+    it "doesn't explode when switching Path to Git sources" do
+      build_gem "foo", "1.0", :to_system => true do |s|
+        s.write "lib/foo.rb", "raise 'fail'"
+      end
+      build_lib "foo", "1.0", :path => lib_path('bar/foo')
+      build_git "bar", "1.0", :path => lib_path('bar') do |s|
+        s.add_dependency 'foo'
+      end
+
+      install_gemfile <<-G
+        source "http://#{gem_repo1}"
+        gem "bar", :path => "#{lib_path('bar')}"
+      G
+
+      install_gemfile <<-G
+        source "http://#{gem_repo1}"
+        gem "bar", :git => "#{lib_path('bar')}"
+      G
+
+      should_be_installed "foo 1.0", "bar 1.0"
+    end
+
+    it "doesn't explode when switching Gem to Git source" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack-obama"
+        gem "rack", "1.0.0"
+      G
+
+      build_git "rack", "1.0" do |s|
+        s.write "lib/new_file.rb", "puts 'USING GIT'"
+      end
+
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack-obama"
+        gem "rack", "1.0.0", :git => "#{lib_path("rack-1.0")}"
+      G
+
+      run "require 'new_file'"
+      out.should == "USING GIT"
+    end
+  end
+
+  describe "bundle install after the remote has been updated" do
+    it "installs" do
+      build_git "valim"
+
+      install_gemfile <<-G
+        gem "valim", :git => "file://#{lib_path("valim-1.0")}"
+      G
+
+      old_revision = revision_for(lib_path("valim-1.0"))
+      update_git "valim"
+      new_revision = revision_for(lib_path("valim-1.0"))
+
+      lockfile = File.read(bundled_app("Gemfile.lock"))
+      File.open(bundled_app("Gemfile.lock"), "w") do |file|
+        file.puts lockfile.gsub(/revision: #{old_revision[0..6]}/, "revision: #{new_revision[0..6]}")
+      end
+
+      bundle "install"
+
+      run <<-R
+        require "valim"
+        puts VALIM_PREV_REF
+      R
+
+      out.should == old_revision
+    end
+  end
 end

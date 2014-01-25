@@ -17,6 +17,17 @@ describe "bundle cache" do
     end
 
     it "uses the cache as a source when installing gems" do
+      build_gem "omg", :path => bundled_app('vendor/cache')
+
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "omg"
+      G
+
+      should_be_installed "omg 1.0.0"
+    end
+
+    it "uses the cache as a source when installing gems with --local" do
       system_gems []
       bundle "install --local"
 
@@ -49,26 +60,49 @@ describe "bundle cache" do
       bundle "install --local"
       should_be_installed("rack 1.0.0")
     end
+
+    it "creates a lockfile" do
+      cache_gems "rack-1.0.0"
+
+      gemfile <<-G
+        gem "rack"
+      G
+
+      bundle "cache"
+
+      bundled_app("Gemfile.lock").should exist
+    end
   end
 
   describe "when there are also git sources" do
-    it "still works" do
+    before do
       build_git "foo"
       system_gems "rack-1.0.0"
 
       install_gemfile <<-G
         source "file://#{gem_repo1}"
-        git "#{lib_path("foo-1.0")}"
+        git "#{lib_path("foo-1.0")}" do
+          gem 'foo'
+        end
         gem 'rack'
-        gem 'foo'
       G
+    end
 
+    it "still works" do
       bundle :cache
 
       system_gems []
       bundle "install --local"
 
       should_be_installed("rack 1.0.0", "foo 1.0")
+    end
+
+    it "should not explode if the lockfile is not present" do
+      FileUtils.rm(bundled_app("Gemfile.lock"))
+
+      bundle :cache
+
+      bundled_app("Gemfile.lock").should exist
     end
   end
 
@@ -155,6 +189,16 @@ describe "bundle cache" do
       bundled_app("vendor/cache/foo").mkdir
       File.open(bundled_app("vendor/cache/bar"), 'w'){|f| f.write("not a gem") }
       bundle :cache
+    end
+
+    it "does not say that it is removing gems when it isn't actually doing so" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack"
+      G
+      bundle "cache"
+      bundle "install"
+      out.should_not =~ /removing/i
     end
   end
 

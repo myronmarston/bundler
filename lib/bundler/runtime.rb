@@ -4,17 +4,13 @@ module Bundler
   class Runtime < Environment
     include SharedHelpers
 
-    def initialize(*)
-      super
-      lock
-    end
-
     def setup(*groups)
       # Has to happen first
       clean_load_path
 
       specs = groups.any? ? @definition.specs_for(groups) : requested_specs
 
+      setup_environment
       cripple_rubygems(specs)
 
       # Activate the specs
@@ -35,8 +31,18 @@ module Bundler
         load_paths = spec.load_paths.reject {|path| $LOAD_PATH.include?(path)}
         $LOAD_PATH.unshift(*load_paths)
       end
+
+      lock
+
       self
     end
+
+    REGEXPS = [
+      /^no such file to load -- (.+)$/i,
+      /^Missing \w+ (?:file\s*)?([^\s]+.rb)$/i,
+      /^Missing API definition file in (.+)$/i,
+      /^cannot load such file -- (.+)$/i,
+    ]
 
     def require(*groups)
       groups.map! { |g| g.to_sym }
@@ -45,19 +51,21 @@ module Bundler
       @definition.dependencies.each do |dep|
         # Skip the dependency if it is not in any of the requested
         # groups
-        next unless (dep.groups & groups).any?
+        next unless ((dep.groups & groups).any? && dep.current_platform?)
+
+        required_file = nil
 
         begin
           # Loop through all the specified autorequires for the
           # dependency. If there are none, use the dependency's name
           # as the autorequire.
           Array(dep.autorequire || dep.name).each do |file|
+            required_file = file
             Kernel.require file
           end
-        rescue LoadError
-          # Only let a LoadError through if the autorequire was explicitly
-          # specified by the user.
-          raise if dep.autorequire
+        rescue LoadError => e
+          REGEXPS.find { |r| r =~ e.message }
+          raise if dep.autorequire || $1 != required_file
         end
       end
     end
@@ -80,18 +88,29 @@ module Bundler
         next if spec.name == 'bundler'
         spec.source.cache(spec) if spec.source.respond_to?(:cache)
       end
+      prune_cache unless Bundler.settings[:no_prune]
     end
 
     def prune_cache
       FileUtils.mkdir_p(cache_path)
 
-      Bundler.ui.info "Removing outdated .gem files from vendor/cache"
-      Pathname.glob(cache_path.join("*.gem").to_s).each do |gem_path|
-        cached_spec = Gem::Format.from_file_by_path(gem_path).spec
-        next unless Gem::Platform.match(cached_spec.platform)
-        unless specs.any?{|s| s.full_name == cached_spec.full_name }
-          Bundler.ui.info "  * #{File.basename(gem_path)}"
-          gem_path.rmtree
+      resolve = @definition.resolve
+      cached  = Dir["#{cache_path}/*.gem"]
+
+      cached = cached.delete_if do |path|
+        spec = Gem::Format.from_file_by_path(path).spec
+
+        resolve.any? do |s|
+          s.name == spec.name && s.version == spec.version
+        end
+      end
+
+      if cached.any?
+        Bundler.ui.info "Removing outdated .gem files from vendor/cache"
+
+        cached.each do |path|
+          Bundler.ui.info "  * #{File.basename(path)}"
+          File.delete(path)
         end
       end
     end
@@ -102,5 +121,28 @@ module Bundler
       root.join("vendor/cache")
     end
 
+    def setup_environment
+      begin
+        ENV["BUNDLE_BIN_PATH"] = Gem.bin_path("bundler", "bundle", VERSION)
+      rescue Gem::GemNotFoundException
+        ENV["BUNDLE_BIN_PATH"] = File.expand_path("../../../bin/bundle", __FILE__)
+      end
+
+      # Set PATH
+      paths = (ENV["PATH"] || "").split(File::PATH_SEPARATOR)
+      paths.unshift "#{Bundler.bundle_path}/bin"
+      ENV["PATH"] = paths.uniq.join(File::PATH_SEPARATOR)
+
+      # Set BUNDLE_GEMFILE
+      ENV["BUNDLE_GEMFILE"] = default_gemfile.to_s
+
+      # Set RUBYOPT
+      rubyopt = [ENV["RUBYOPT"]].compact
+      if rubyopt.empty? || rubyopt.first !~ /-rbundler\/setup/
+        rubyopt.unshift "-rbundler/setup"
+        rubyopt.unshift "-I#{File.expand_path('../..', __FILE__)}"
+        ENV["RUBYOPT"] = rubyopt.join(' ')
+      end
+    end
   end
 end

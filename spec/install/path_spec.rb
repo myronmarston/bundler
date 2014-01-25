@@ -84,6 +84,64 @@ describe "bundle install with explicit source paths" do
     should_be_installed "foo 1.0"
   end
 
+  it "supports gemspec syntax" do
+    build_lib "foo", "1.0", :path => lib_path("foo") do |s|
+      s.add_dependency "rack", "1.0"
+    end
+
+    gemfile = <<-G
+      source "file://#{gem_repo1}"
+      gemspec
+    G
+
+    File.open(lib_path("foo/Gemfile"), "w") {|f| f.puts gemfile }
+
+    Dir.chdir(lib_path("foo")) do
+      bundle "install"
+      should_be_installed "foo 1.0"
+      should_be_installed "rack 1.0"
+    end
+  end
+
+  it "supports gemspec syntax with an alternative path" do
+    build_lib "foo", "1.0", :path => lib_path("foo") do |s|
+      s.add_dependency "rack", "1.0"
+    end
+
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gemspec :path => "#{lib_path("foo")}"
+    G
+
+    should_be_installed "foo 1.0"
+    should_be_installed "rack 1.0"
+  end
+
+  it "raises if there are multiple gemspecs" do
+    build_lib "foo", "1.0", :path => lib_path("foo") do |s|
+      s.write "bar.gemspec"
+    end
+
+    install_gemfile <<-G, :exit_status => true
+      gemspec :path => "#{lib_path("foo")}"
+    G
+
+    @exitstatus.should == 15
+    out.should =~ /There are multiple gemspecs/
+  end
+
+  it "allows :name to be specified to resolve ambiguity" do
+    build_lib "foo", "1.0", :path => lib_path("foo") do |s|
+      s.write "bar.gemspec"
+    end
+
+    install_gemfile <<-G, :exit_status => true
+      gemspec :path => "#{lib_path("foo")}", :name => "foo"
+    G
+
+    should_be_installed "foo 1.0"
+  end
+
   it "sets up executables" do
     pending_jruby_shebang_fix
 
@@ -200,6 +258,78 @@ describe "bundle install with explicit source paths" do
       bundle "install"
 
       should_be_installed "foo 1.0", "bar 2.0"
+    end
+  end
+
+  describe "when dependencies in the path are updated" do
+    before :each do
+      build_lib "foo", "1.0", :path => lib_path("foo")
+
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "foo", :path => "#{lib_path('foo')}"
+      G
+    end
+
+    it "gets dependencies that are updated in the path" do
+      build_lib "foo", "1.0", :path => lib_path("foo") do |s|
+        s.add_dependency "rack"
+      end
+
+      bundle "install"
+
+      should_be_installed "rack 1.0.0"
+    end
+  end
+
+  describe "switching sources" do
+    it "doesn't switch pinned git sources to rubygems when pinning the parent gem to a path source" do
+      build_gem "foo", "1.0", :to_system => true do |s|
+        s.write "lib/foo.rb", "raise 'fail'"
+      end
+      build_lib "foo", "1.0", :path => lib_path('bar/foo')
+      build_git "bar", "1.0", :path => lib_path('bar') do |s|
+        s.add_dependency 'foo'
+      end
+
+      install_gemfile <<-G
+        source "http://#{gem_repo1}"
+        gem "bar", :git => "#{lib_path('bar')}"
+      G
+
+      install_gemfile <<-G
+        source "http://#{gem_repo1}"
+        gem "bar", :path => "#{lib_path('bar')}"
+      G
+
+      should_be_installed "foo 1.0", "bar 1.0"
+    end
+
+    it "switches the source when the gem existed in rubygems and the path was already being used for another gem" do
+      build_lib "foo", "1.0", :path => lib_path("foo")
+      build_gem "bar", "1.0", :to_system => true do |s|
+        s.write "lib/bar.rb", "raise 'fail'"
+      end
+
+      install_gemfile <<-G
+        source "http://#{gem_repo1}"
+        gem "bar"
+        path "#{lib_path('foo')}" do
+          gem "foo"
+        end
+      G
+
+      build_lib "bar", "1.0", :path => lib_path("foo/bar")
+
+      install_gemfile <<-G
+        source "http://#{gem_repo1}"
+        path "#{lib_path('foo')}" do
+          gem "foo"
+          gem "bar"
+        end
+      G
+
+      should_be_installed "bar 1.0"
     end
   end
 end

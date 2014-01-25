@@ -1,6 +1,81 @@
 require "spec_helper"
 
 describe "Bundler.setup" do
+  it "raises if the Gemfile was not yet installed" do
+    gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+    G
+
+    ruby <<-R
+      require 'rubygems'
+      require 'bundler'
+
+      begin
+        Bundler.setup
+        puts "FAIL"
+      rescue Bundler::GemNotFound
+        puts "WIN"
+      end
+    R
+
+    out.should == "WIN"
+  end
+
+  it "doesn't create a Gemfile.lock if the setup fails" do
+    gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+    G
+
+    ruby <<-R, :expect_err => true
+      require 'rubygems'
+      require 'bundler'
+
+      Bundler.setup
+    R
+
+    bundled_app("Gemfile.lock").should_not exist
+  end
+
+  it "doesn't change the Gemfile.lock if the setup fails" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+    G
+
+    lockfile = File.read(bundled_app("Gemfile.lock"))
+
+    gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+      gem "nosuchgem", "10.0"
+    G
+
+    ruby <<-R, :expect_err => true
+      require 'rubygems'
+      require 'bundler'
+
+      Bundler.setup
+    R
+
+    File.read(bundled_app("Gemfile.lock")).should == lockfile
+  end
+
+  it "makes a Gemfile.lock if setup succeeds" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+    G
+
+    lockfile = File.read(bundled_app("Gemfile.lock"))
+
+    FileUtils.rm(bundled_app("Gemfile.lock"))
+
+    run "1"
+    bundled_app("Gemfile.lock").should exist
+  end
+
   it "uses BUNDLE_GEMFILE to locate the gemfile if present" do
     gemfile <<-G
       source "file://#{gem_repo1}"
@@ -104,15 +179,86 @@ describe "Bundler.setup" do
   end
 
   describe "with git" do
-    it "provides a useful exception when the git repo is not checked out yet" do
+    before do
       build_git "rack", "1.0.0"
 
       gemfile <<-G
-        gem "foo", :git => "#{lib_path('rack-1.0.0')}"
+        gem "rack", :git => "#{lib_path('rack-1.0.0')}"
       G
+    end
 
+    it "provides a useful exception when the git repo is not checked out yet" do
       run "1", :expect_err => true
       err.should include("#{lib_path('rack-1.0.0')} (at master) is not checked out. Please run `bundle install`")
+    end
+
+    it "does not hit the git binary if the lockfile is available and up to date" do
+      bundle "install"
+
+      break_git!
+
+      ruby <<-R
+        require 'rubygems'
+        require 'bundler'
+
+        begin
+          Bundler.setup
+          puts "WIN"
+        rescue Exception => e
+          puts "FAIL"
+        end
+      R
+
+      out.should == "WIN"
+    end
+
+    it "provides a good exception if the lockfile is unavailable" do
+      bundle "install"
+
+      FileUtils.rm(bundled_app("Gemfile.lock"))
+
+      break_git!
+
+      ruby <<-R
+        require "rubygems"
+        require "bundler"
+
+        begin
+          Bundler.setup
+          puts "FAIL"
+        rescue Bundler::GitError => e
+          puts e.message
+        end
+      R
+
+      run "puts 'FAIL'", :expect_err => true
+
+      err.should_not include "This is not the git you are looking for"
+    end
+
+    it "works even when the cache directory has been deleted" do
+      bundle "install vendor"
+      FileUtils.rm_rf vendored_gems('cache')
+      should_be_installed "rack 1.0.0"
+    end
+
+    it "does not randomly change the path when specifying --path and the bundle directory becomes read only" do
+      begin
+        bundle "install vendor"
+
+        Dir["**/*"].each do |f|
+          File.directory?(f) ?
+            File.chmod(0555, f) :
+            File.chmod(0444, f)
+        end
+        should_be_installed "rack 1.0.0"
+      ensure
+        Dir["**/*"].each do |f|
+          File.directory?(f) ?
+            File.chmod(0755, f) :
+            File.chmod(0644, f)
+        end
+      end
     end
   end
 
@@ -248,4 +394,19 @@ describe "Bundler.setup" do
     out.should == "yay"
   end
 
+  it "ignores Gem.refresh" do
+    system_gems "rack-1.0.0"
+
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "activesupport"
+    G
+
+    run <<-R
+      Gem.refresh
+      puts Gem.source_index.find_name("rack").inspect
+    R
+
+    out.should == "[]"
+  end
 end

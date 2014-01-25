@@ -1,5 +1,6 @@
 $:.unshift File.expand_path('../vendor', __FILE__)
 require 'thor'
+require 'thor/actions'
 require 'rubygems/config_file'
 
 # Work around a RubyGems bug
@@ -7,6 +8,8 @@ Gem.configuration
 
 module Bundler
   class CLI < Thor
+    include Thor::Actions
+
     def initialize(*)
       super
       use_shell = options["no-color"] ? Thor::Shell::Basic.new : shell
@@ -15,10 +18,42 @@ module Bundler
       Gem::DefaultUserInteraction.ui = UI::RGProxy.new(Bundler.ui)
     end
 
-    check_unknown_options! unless ARGV.include?("exec")
+    check_unknown_options! unless ARGV.include?("exec") || ARGV.include?("config")
 
     default_task :install
     class_option "no-color", :type => :boolean, :banner => "Disable colorization in output"
+
+    def help(cli = nil)
+      case cli
+      when "gemfile" then command = "gemfile.5"
+      when nil       then command = "bundle"
+      else command = "bundle-#{cli}"
+      end
+
+      manpages = %w(
+          bundle
+          bundle-config
+          bundle-exec
+          bundle-install
+          bundle-package
+          bundle-update
+          gemfile.5)
+
+      if manpages.include?(command)
+        root = File.expand_path("../man", __FILE__)
+
+        if have_groff?
+          groff   = "groff -Wall -mtty-char -mandoc -Tascii"
+          pager   = ENV['MANPAGER'] || ENV['PAGER'] || 'more'
+
+          Kernel.exec "#{groff} #{root}/#{command} | #{pager}"
+        else
+          puts File.read("#{root}/#{command}.txt")
+        end
+      else
+        super
+      end
+    end
 
     desc "init", "Generates a Gemfile into the current working directory"
     long_desc <<-D
@@ -58,8 +93,17 @@ module Bundler
       all gems are found, Bundler prints a success message and exits with a status of 0.
       If not, the first missing gem is listed and Bundler exits status 1.
     D
+    method_option "gemfile", :type => :string, :banner =>
+      "Use the specified gemfile instead of Gemfile"
     def check
-      not_installed = Bundler.definition.missing_specs
+      ENV['BUNDLE_GEMFILE'] = File.expand_path(options[:gemfile]) if options[:gemfile]
+      begin
+        not_installed = Bundler.definition.missing_specs
+      rescue GemNotFound, VersionConflict
+        Bundler.ui.error "Your Gemfile's dependencies could not be satisfied"
+        Bundler.ui.warn  "Install missing gems with `bundle install`"
+        exit 1
+      end
 
       if not_installed.any?
         Bundler.ui.error "The following gems are missing"
@@ -67,6 +111,7 @@ module Bundler
         Bundler.ui.warn "Install missing gems with `bundle install`"
         exit 1
       else
+        Bundler.load.lock
         Bundler.ui.info "The Gemfile's dependencies are satisfied"
       end
     end
@@ -85,7 +130,7 @@ module Bundler
     method_option "without", :type => :array, :banner =>
       "Exclude gems that are part of the specified named group."
     method_option "disable-shared-gems", :type => :boolean, :banner =>
-      "Do not use any shared gems, such as the system gem repository."
+      "This option is deprecated. Please do not use it."
     method_option "gemfile", :type => :string, :banner =>
       "Use the specified gemfile instead of Gemfile"
     method_option "no-prune", :type => :boolean, :banner =>
@@ -96,22 +141,90 @@ module Bundler
       "Only output warnings and errors."
     method_option "local", :type => :boolean, :banner =>
       "Do not attempt to fetch gems remotely and use the gem cache instead"
+    method_option "binstubs", :type => :string, :lazy_default => "bin", :banner =>
+      "Generate bin stubs for bundled gems to ./bin"
+    method_option "path", :type => :string, :banner =>
+      "Specify a different path than the system default ($BUNDLE_PATH or $GEM_HOME). Bundler will remember this value for future installs on this machine"
+    method_option "system", :type => :boolean, :banner =>
+      "Install to the system location ($BUNDLE_PATH or $GEM_HOME) even if the bundle was previously installed somewhere else for this application"
+    method_option "frozen", :type => :boolean, :banner =>
+      "Do not allow the Gemfile.lock to be updated after this install"
+    method_option "deployment", :type => :boolean, :banner =>
+      "Install using defaults tuned for deployment environments"
+    method_option "production", :type => :boolean, :banner =>
+      "Deprecated, please use --deployment instead"
     def install(path = nil)
       opts = options.dup
       opts[:without] ||= []
       opts[:without].map! { |g| g.to_sym }
 
+
+      ENV['BUNDLE_GEMFILE'] = File.expand_path(opts[:gemfile]) if opts[:gemfile]
+
+      if opts[:production]
+        opts[:deployment] = true
+        Bundler.ui.warn "The --production option is deprecated, and will be removed in " \
+                        "the final release of Bundler 1.0. Please use --deployment instead."
+      end
+
+      if (path || opts[:path] || opts[:deployment]) && opts[:system]
+        Bundler.ui.error "You have specified both a path to install your gems to, \n" \
+                         "as well as --system. Please choose."
+        exit 1
+      end
+
+      if path && opts[:path]
+        Bundler.ui.error "You have specified a path via `bundle install #{path}` as well as\n" \
+                         "by `bundle install --path #{options[:path]}`. These options are\n" \
+                         "equivalent, so please use one or the other."
+        exit 1
+      end
+
+      if opts["disable-shared-gems"]
+        Bundler.ui.error "The disable-shared-gem option is no longer available.\n\n" \
+                         "Instead, use `bundle install` to install to your system,\n" \
+                         "or `bundle install --path path/to/gems` to install to an isolated\n" \
+                         "location. Bundler will resolve relative paths relative to\n" \
+                         "your `Gemfile`."
+        exit 1
+      end
+
+      if opts[:deployment] || opts[:frozen]
+        Bundler.settings[:frozen] = '1'
+
+        unless Bundler.default_lockfile.exist?
+          flag = opts[:deployment] ? '--deployment' : '--frozen'
+          raise ProductionError, "The #{flag} flag requires a Gemfile.lock. Please make " \
+                                 "sure you have checked your Gemfile.lock into version control " \
+                                 "before deploying."
+        end
+
+        if Bundler.root.join("vendor/cache").exist?
+          opts[:local] = true
+        end
+      end
+
       # Can't use Bundler.settings for this because settings needs gemfile.dirname
-      ENV['BUNDLE_GEMFILE'] = opts[:gemfile] if opts[:gemfile]
+      Bundler.settings[:path] = nil if opts[:system]
+      Bundler.settings[:path] = "vendor/bundle" if opts[:deployment]
       Bundler.settings[:path] = path if path
-      Bundler.settings[:disable_shared_gems] = '1' if options["disable-shared-gems"] || path
+      Bundler.settings[:path] = opts[:path] if opts[:path]
+      Bundler.settings[:bin] = opts["binstubs"] if opts[:binstubs]
+      Bundler.settings[:disable_shared_gems] = '1' if Bundler.settings[:path]
       Bundler.settings.without = opts[:without]
       Bundler.ui.be_quiet! if opts[:quiet]
 
       Installer.install(Bundler.root, Bundler.definition, opts)
-      cache if Bundler.root.join("vendor/cache").exist?
+      Bundler.load.cache if Bundler.root.join("vendor/cache").exist?
       Bundler.ui.confirm "Your bundle is complete! " +
         "Use `bundle show [gemname]` to see where a bundled gem is installed."
+
+      Bundler.ui.confirm "\nYour bundle was installed to `#{Bundler.settings[:path]}`" if Bundler.settings[:path]
+
+      if path
+        Bundler.ui.warn "\nIf you meant to install it to your system, please remove the\n" \
+                        "`#{path}` directory and run `bundle install --system`"
+      end
     rescue GemNotFound => e
       if Bundler.definition.no_sources?
         Bundler.ui.warn "Your Gemfile doesn't have any sources. You can add one with a line like 'source :gemcutter'"
@@ -131,13 +244,13 @@ module Bundler
 
       if gems.empty? && sources.empty?
         # We're doing a full update
-        FileUtils.rm_f Bundler.root.join("Gemfile.lock")
+        Bundler.definition(true)
       else
         Bundler.definition(:gems => gems, :sources => sources)
       end
 
-      Installer.install Bundler.root, Bundler.definition
-      cache if Bundler.root.join("vendor/cache").exist?
+      Installer.install Bundler.root, Bundler.definition, "update" => true
+      Bundler.load.cache if Bundler.root.join("vendor/cache").exist?
       Bundler.ui.confirm "Your bundle is updated! " +
         "Use `bundle show [gemname]` to see where a bundled gem is installed."
     end
@@ -158,6 +271,8 @@ module Bundler
       Calling show with [GEM] will list the exact location of that gem on your machine.
     D
     def show(gem_name = nil)
+      Bundler.load.lock
+
       if gem_name
         Bundler.ui.info locate_gem(gem_name)
       else
@@ -169,11 +284,13 @@ module Bundler
     end
     map %w(list) => "show"
 
-    desc "cache", "Cache all the gems to vendor/cache"
+    desc "cache", "Cache all the gems to vendor/cache", :hide => true
     method_option "no-prune",  :type => :boolean, :banner => "Don't remove stale gems from the cache."
     def cache
+      Bundler.definition.resolve_with_cache!
       Bundler.load.cache
-      Bundler.load.prune_cache unless options[:no_prune]
+      Bundler.settings[:no_prune] = true if options[:no_prune]
+      Bundler.load.lock
     rescue GemNotFound => e
       Bundler.ui.error(e.message)
       Bundler.ui.warn "Run `bundle install` to install missing gems."
@@ -191,7 +308,7 @@ module Bundler
     def package
       install
       # TODO: move cache contents here now that all bundles are locked
-      cache
+      Bundler.load.cache
     end
     map %w(pack) => :package
 
@@ -204,30 +321,76 @@ module Bundler
     def exec(*)
       ARGV.delete("exec")
 
-      # Set PATH
-      paths = (ENV["PATH"] || "").split(File::PATH_SEPARATOR)
-      paths.unshift "#{Bundler.bundle_path}/bin"
-      ENV["PATH"] = paths.uniq.join(File::PATH_SEPARATOR)
-
-      # Set BUNDLE_GEMFILE
-      ENV["BUNDLE_GEMFILE"] = Bundler::SharedHelpers.default_gemfile.to_s
-
-      # Set RUBYOPT
-      rubyopt = [ENV["RUBYOPT"]].compact
-      if rubyopt.empty? || rubyopt.first !~ /-rbundler\/setup/
-        rubyopt.unshift "-rbundler/setup"
-        rubyopt.unshift "-I#{File.expand_path('../..', __FILE__)}"
-        ENV["RUBYOPT"] = rubyopt.join(' ')
-      end
+      Bundler.setup
 
       begin
         # Run
         Kernel.exec(*ARGV)
       rescue Errno::EACCES
         Bundler.ui.error "bundler: not executable: #{ARGV.first}"
+        exit 126
       rescue Errno::ENOENT
         Bundler.ui.error "bundler: command not found: #{ARGV.first}"
         Bundler.ui.warn  "Install missing gem binaries with `bundle install`"
+        exit 127
+      end
+    end
+
+    desc "config NAME [VALUE]", "retrieve or set a configuration value"
+    long_desc <<-D
+      Retrieves or sets a configuration value. If only parameter is provided, retrieve the value. If two parameters are provided, replace the
+      existing value with the newly provided one.
+
+      By default, setting a configuration value sets it for all projects
+      on the machine.
+
+      If a global setting is superceded by local configuration, this command
+      will show the current value, as well as any superceded values and
+      where they were specified.
+    D
+    def config(name = nil, *args)
+      values = ARGV.dup
+      values.shift # remove config
+      values.shift # remove the name
+
+      unless name
+        Bundler.ui.confirm "Settings are listed in order of priority. The top value will be used.\n"
+
+        Bundler.settings.all.each do |setting|
+          Bundler.ui.confirm "#{setting}"
+          with_padding do
+            Bundler.settings.pretty_values_for(setting).each do |line|
+              Bundler.ui.info line
+            end
+          end
+          Bundler.ui.confirm ""
+        end
+        return
+      end
+
+      if values.empty?
+        Bundler.ui.confirm "Settings for `#{name}` in order of priority. The top value will be used"
+        with_padding do
+          Bundler.settings.pretty_values_for(name).each { |line| Bundler.ui.info line }
+        end
+      else
+        locations = Bundler.settings.locations(name)
+
+        if local = locations[:local]
+          Bundler.ui.info "Your application has set #{name} to #{local.inspect}. This will override the " \
+            "system value you are currently setting"
+        end
+
+        if global = locations[:global]
+          Bundler.ui.info "You are replacing the current system value of #{name}, which is currently #{global}"
+        end
+
+        if env = locations[:env]
+          Bundler.ui.info "You have set a bundler environment variable for #{env}. This will take precedence " \
+            "over the system value you are setting"
+        end
+
+        Bundler.settings.set_global(name, values.join(" "))
       end
     end
 
@@ -289,19 +452,47 @@ module Bundler
       end
     end
 
+    desc "gem GEM", "Creates a skeleton for creating a rubygem"
+    def gem(name)
+      target = File.join(Dir.pwd, name)
+      if File.exist?(name)
+        Bundler.ui.error "File already exists at #{File.join(Dir.pwd, name)}"
+        exit 1
+      end
+
+      constant_name = name.split('_').map{|p| p.capitalize}.join
+      constant_name = constant_name.split('-').map{|q| q.capitalize}.join('::') if constant_name =~ /-/
+      constant_array = constant_name.split('::')
+      FileUtils.mkdir_p(File.join(target, 'lib', name))
+      opts = {:name => name, :constant_name => constant_name, :constant_array => constant_array}
+      template(File.join('newgem', 'Gemfile.tt'),                     File.join(target, 'Gemfile'),                 opts)
+      template(File.join('newgem', 'Rakefile.tt'),                    File.join(target, 'Rakefile'),                opts)
+      template(File.join('newgem', 'gitignore.tt'),                   File.join(target, '.gitignore'),              opts)
+      template(File.join('newgem', 'newgem.gemspec.tt'),              File.join(target, "#{name}.gemspec"),         opts)
+      template(File.join('newgem', 'lib', 'newgem.rb.tt'),            File.join(target, 'lib', "#{name}.rb"),       opts)
+      template(File.join('newgem', 'lib', 'newgem', 'version.rb.tt'), File.join(target, 'lib', name, 'version.rb'), opts)
+      Bundler.ui.info "Initializating git repo in #{target}"
+      Dir.chdir(target) { `git init`; `git add .` }
+    end
+
+    def self.source_root
+      File.expand_path(File.join(File.dirname(__FILE__), 'templates'))
+    end
+
   private
+
+    def have_groff?
+      `which groff 2>#{NULL}`
+      $? == 0
+    end
 
     def locate_gem(name)
       spec = Bundler.load.specs.find{|s| s.name == name }
       raise GemNotFound, "Could not find gem '#{name}' in the current bundle." unless spec
+      if spec.name == 'bundler'
+        return File.expand_path('../../../', __FILE__)
+      end
       spec.full_gem_path
-    end
-
-    def self.printable_tasks
-      tasks = super.dup
-      nodoc = /^bundle (cache)/
-      tasks.reject!{|t| t.first =~ nodoc }
-      tasks
     end
   end
 end

@@ -1,3 +1,4 @@
+require 'rbconfig'
 require 'fileutils'
 require 'pathname'
 require 'yaml'
@@ -11,6 +12,7 @@ module Bundler
   autoload :Dependency,          'bundler/dependency'
   autoload :Dsl,                 'bundler/dsl'
   autoload :Environment,         'bundler/environment'
+  autoload :GemHelper,           'bundler/gem_helper'
   autoload :Graph,               'bundler/graph'
   autoload :Index,               'bundler/index'
   autoload :Installer,           'bundler/installer'
@@ -28,12 +30,7 @@ module Bundler
 
   class BundlerError < StandardError
     def self.status_code(code = nil)
-      return @code unless code
-      @code = code
-    end
-
-    def status_code
-      self.class.status_code
+      define_method(:status_code) { code }
     end
   end
 
@@ -42,11 +39,16 @@ module Bundler
   class GemfileError     < BundlerError; status_code(4)  ; end
   class PathError        < BundlerError; status_code(13) ; end
   class GitError         < BundlerError; status_code(11) ; end
+  class DeprecatedError  < BundlerError; status_code(12) ; end
   class GemspecError     < BundlerError; status_code(14) ; end
-  class DeprecatedMethod < BundlerError; status_code(12) ; end
-  class DeprecatedOption < BundlerError; status_code(12) ; end
-  class GemspecError     < BundlerError; status_code(14) ; end
-  class InvalidOption    < BundlerError; status_code(15) ; end
+  class DslError         < BundlerError; status_code(15) ; end
+  class ProductionError  < BundlerError; status_code(16) ; end
+  class InvalidOption    < DslError                      ; end
+
+
+  WINDOWS = RbConfig::CONFIG["host_os"] =~ %r!(msdos|mswin|djgpp|mingw)!
+  NULL    = WINDOWS ? "NUL" : "/dev/null"
+
 
   class VersionConflict  < BundlerError
     attr_reader :conflicts
@@ -83,7 +85,8 @@ module Bundler
 
     def bin_path
       @bin_path ||= begin
-        path = settings[:bin] || "#{Gem.user_home}/.bundle/bin"
+        path = settings[:bin] || "bin"
+        path = Pathname.new(path).expand_path(root)
         FileUtils.mkdir_p(path)
         Pathname.new(path).expand_path
       end
@@ -122,9 +125,16 @@ module Bundler
       @definition ||= begin
         configure
         upgrade_lockfile
-        lockfile = root.join("Gemfile.lock")
-        Definition.build(default_gemfile, lockfile, unlock)
+        Definition.build(default_gemfile, default_lockfile, unlock)
       end
+    end
+
+    def ruby_scope
+      "#{Gem.ruby_engine}/#{Gem::ConfigMap[:ruby_version]}"
+    end
+
+    def user_bundle_path
+      Pathname.new(Gem.user_home).join(".bundler")
     end
 
     def home
@@ -147,16 +157,22 @@ module Bundler
       default_gemfile.dirname.expand_path
     end
 
+    def app_config_path
+      ENV['BUNDLE_APP_CONFIG'] ?
+        Pathname.new(ENV['BUNDLE_APP_CONFIG']).expand_path(root) :
+        root.join('.bundle')
+    end
+
     def app_cache
       root.join("vendor/cache")
     end
 
     def tmp
-      "#{Gem.user_home}/.bundler/tmp"
+      user_bundle_path.join("tmp", Process.pid.to_s)
     end
 
     def settings
-      @settings ||= Settings.new(root)
+      @settings ||= Settings.new(app_config_path)
     end
 
     def with_clean_env
@@ -171,33 +187,54 @@ module Bundler
       SharedHelpers.default_gemfile
     end
 
-    WINDOWS = Config::CONFIG["host_os"] =~ %r!(msdos|mswin|djgpp|mingw)!
-    NULL    = WINDOWS ? "NUL" : "/dev/null"
+    def default_lockfile
+      SharedHelpers.default_lockfile
+    end
 
     def requires_sudo?
       path = bundle_path
       path = path.parent until path.exist?
+      sudo_present = !`which sudo 2>#{NULL}`.empty?
 
-      case
-      when File.writable?(path) ||
-           `which sudo 2>#{NULL}`.empty? ||
-           File.owned?(path)
-        false
-      else
-        true
-      end
+      settings.allow_sudo? && !File.writable?(path) && sudo_present
     end
 
     def mkdir_p(path)
       if requires_sudo?
-        sudo "mkdir -p '#{path}'"
+        sudo "mkdir -p '#{path}'" unless File.exist?(path)
       else
         FileUtils.mkdir_p(path)
       end
     end
 
     def sudo(str)
-      `sudo -p 'Enter your password to install the bundled RubyGems to your system: ' -E #{str}`
+      `sudo -p 'Enter your password to install the bundled RubyGems to your system: ' #{str}`
+    end
+
+    def load_gemspec(file)
+      path = Pathname.new(file)
+      # Eval the gemspec from its parent directory
+      Dir.chdir(path.dirname) do
+        begin
+          Gem::Specification.from_yaml(path.basename)
+          # Raises ArgumentError if the file is not valid YAML
+        rescue ArgumentError, SyntaxError, Gem::EndOfYAMLException, Gem::Exception
+          begin
+            eval(File.read(path.basename), TOPLEVEL_BINDING, path.expand_path.to_s)
+          rescue LoadError => e
+            original_line = e.backtrace.find { |line| line.include?(path.to_s) }
+            msg  = "There was a LoadError while evaluating #{path.basename}:\n  #{e.message}"
+            msg << " from\n  #{original_line}" if original_line
+            msg << "\n"
+
+            if RUBY_VERSION >= "1.9.0"
+              msg << "\nDoes it try to require a relative path? That doesn't work in Ruby 1.9."
+            end
+
+            raise GemspecError, msg
+          end
+        end
+      end
     end
 
   private
@@ -206,7 +243,7 @@ module Bundler
       if settings[:disable_shared_gems]
         ENV['GEM_PATH'] = ''
         ENV['GEM_HOME'] = File.expand_path(bundle_path, root)
-      else
+      elsif Gem.dir != bundle_path.to_s
         paths = [Gem.dir, Gem.path].flatten.compact.uniq.reject{|p| p.empty? }
         ENV["GEM_PATH"] = paths.join(File::PATH_SEPARATOR)
         ENV["GEM_HOME"] = bundle_path.to_s
@@ -216,7 +253,7 @@ module Bundler
     end
 
     def upgrade_lockfile
-      lockfile = root.join("Gemfile.lock")
+      lockfile = default_lockfile
       if lockfile.exist? && lockfile.read(3) == "---"
         Bundler.ui.warn "Detected Gemfile.lock generated by 0.9, deleting..."
         lockfile.rmtree

@@ -1,6 +1,6 @@
-module Bundler
-  class DslError < StandardError; end
+require 'bundler/dependency'
 
+module Bundler
   class Dsl
     def self.evaluate(gemfile)
       builder = new
@@ -8,7 +8,7 @@ module Bundler
       builder.to_definition
     end
 
-    VALID_PLATFORMS = [:ruby_18, :ruby_19, :ruby, :jruby, :mswin]
+    VALID_PLATFORMS = Bundler::Dependency::PLATFORM_MAP.keys.freeze
 
     def initialize
       @rubygems_source = Source::Rubygems.new
@@ -20,14 +20,17 @@ module Bundler
       @env             = nil
     end
 
-    def gemspec(opts)
+    def gemspec(opts = nil)
       path              = opts && opts[:path] || '.'
       name              = opts && opts[:name] || '*'
       development_group = opts && opts[:development_group] || :development
+      path              = File.expand_path(path, Bundler.default_gemfile.dirname)
       gemspecs = Dir[File.join(path, "#{name}.gemspec")]
+
       case gemspecs.size
       when 1
         spec = Gem::Specification.load(gemspecs.first)
+        gem spec.name, :path => path
         spec.runtime_dependencies.each do |dep|
           gem dep.name, dep.requirement.to_s
         end
@@ -44,8 +47,12 @@ module Bundler
     end
 
     def gem(name, *args)
+      if name.is_a?(Symbol)
+        raise GemfileError, %{You need to specify gem names as Strings. Use 'gem "#{name.to_s}"' instead.}
+      end
+
       options = Hash === args.last ? args.pop : {}
-      version = args.last || ">= 0"
+      version = args || [">= 0"]
       if group = options[:groups] || options[:group]
         options[:group] = group
       end
@@ -53,6 +60,21 @@ module Bundler
       _deprecated_options(options)
       _normalize_options(name, version, options)
 
+      dep = Dependency.new(name, version, options)
+
+      if current = @dependencies.find { |d| d.name == dep.name }
+        if current.requirement != dep.requirement
+          raise DslError, "You cannot specify the same gem twice with different version requirements. " \
+                          "You specified: #{current.name} (#{current.requirement}) and " \
+                          "#{dep.name} (#{dep.requirement})"
+        end
+
+        if current.source != dep.source
+          raise DslError, "You cannot specify the same gem twice coming from different sources. You " \
+                          "specified that #{dep.name} (#{dep.requirement}) should come from " \
+                          "#{current.source || 'an unspecfied source'} and #{dep.source}"
+        end
+      end
       @dependencies << Dependency.new(name, version, options)
     end
 
@@ -80,6 +102,17 @@ module Bundler
     end
 
     def git(uri, options = {}, source_options = {}, &blk)
+      unless block_given?
+        msg = "You can no longer specify a git source by itself. Instead, \n" \
+              "either use the :git option on a gem, or specify the gems that \n" \
+              "bundler should find in the git source by passing a block to \n" \
+              "the git method, like: \n\n" \
+              "  git 'git://github.com/rails/rails.git' do\n" \
+              "    gem 'rails'\n" \
+              "  end"
+        raise DeprecatedError, msg
+      end
+
       source Source::Git.new(_normalize_hash(options).merge("uri" => uri)), source_options, &blk
     end
 
@@ -121,7 +154,7 @@ module Bundler
           message << "and is no longer supported."
         end
         message << "\nSee the README for more information on upgrading from Bundler 0.8."
-        raise DeprecatedMethod, message
+        raise DeprecatedError, message
       end
     end
 
@@ -158,7 +191,7 @@ module Bundler
     def _normalize_options(name, version, opts)
       _normalize_hash(opts)
 
-      invalid_keys = opts.keys - %w(group git path name branch ref tag require submodules)
+      invalid_keys = opts.keys - %w(group git path name branch ref tag require submodules platforms)
       if invalid_keys.any?
         plural = invalid_keys.size > 1
         message = "You passed #{invalid_keys.map{|k| ':'+k }.join(", ")} "
@@ -185,8 +218,8 @@ module Bundler
       # Normalize git and path options
       ["git", "path"].each do |type|
         if param = opts[type]
-          options = _version?(version) ? opts.merge("name" => name, "version" => version) : opts.dup
-          source = send(type, param, options, :prepend => true)
+          options = _version?(version.first) ? opts.merge("name" => name, "version" => version.first) : opts.dup
+          source = send(type, param, options, :prepend => true) {}
           opts["source"] = source
         end
       end
@@ -199,13 +232,13 @@ module Bundler
 
     def _deprecated_options(options)
       if options.include?(:require_as)
-        raise DeprecatedOption, "Please replace :require_as with :require"
+        raise DeprecatedError, "Please replace :require_as with :require"
       elsif options.include?(:vendored_at)
-        raise DeprecatedOption, "Please replace :vendored_at with :path"
+        raise DeprecatedError, "Please replace :vendored_at with :path"
       elsif options.include?(:only)
-        raise DeprecatedOption, "Please replace :only with :group"
+        raise DeprecatedError, "Please replace :only with :group"
       elsif options.include?(:except)
-        raise DeprecatedOption, "The :except option is no longer supported"
+        raise DeprecatedError, "The :except option is no longer supported"
       end
     end
   end

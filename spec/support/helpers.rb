@@ -1,9 +1,10 @@
 module Spec
   module Helpers
     def reset!
+      @in_p, @out_p, @err_p = nil, nil, nil
       Dir["#{tmp}/{gems/*,*}"].each do |dir|
         next if %(base remote1 gems rubygems_1_3_5 rubygems_1_3_6 rubygems_master).include?(File.basename(dir))
-        if File.owned?(dir)
+        unless ENV['BUNDLER_SUDO_TESTS']
           FileUtils.rm_rf(dir)
         else
           `sudo rm -rf #{dir}`
@@ -15,7 +16,7 @@ module Spec
       Gem.configuration.write
     end
 
-    attr_reader :out, :err
+    attr_reader :out, :err, :exitstatus
 
     def in_app_root(&blk)
       Dir.chdir(bundled_app, &blk)
@@ -64,27 +65,29 @@ module Spec
 
     def ruby(ruby, options = {})
       expect_err = options.delete(:expect_err)
-      ruby.gsub!(/(?=")/, "\\")
-      ruby.gsub!('$', '\\$')
+      ruby.gsub!(/["`\$]/) {|m| "\\#{m}" }
       sys_exec(%'#{Gem.ruby} -I#{lib} -e "#{ruby}"', expect_err)
     end
 
     def gembin(cmd)
       lib = File.expand_path("../../../lib", __FILE__)
       old, ENV['RUBYOPT'] = ENV['RUBYOPT'], "#{ENV['RUBYOPT']} -I#{lib}"
-      sys_exec(cmd)
+      cmd = bundled_app("bin/#{cmd}") unless cmd.to_s.include?("/")
+      sys_exec(cmd.to_s)
     ensure
       ENV['RUBYOPT'] = old
     end
 
     def sys_exec(cmd, expect_err = false)
-      require "open3"
-      @in, @out, @err = Open3.popen3(cmd)
+      Open3.popen3(cmd.to_s) do |stdin, stdout, stderr|
+        @in_p, @out_p, @err_p = stdin, stdout, stderr
 
-      yield @in if block_given?
+        yield @in_p if block_given?
+        @in_p.close
 
-      @err = err.read_available_bytes.strip
-      @out = out.read_available_bytes.strip
+        @out = @out_p.read_available_bytes.strip
+        @err = @err_p.read_available_bytes.strip
+      end
 
       puts @err unless expect_err || @err.empty? || !$show_err
       @out
@@ -156,6 +159,28 @@ module Spec
       ENV['GEM_HOME'], ENV['GEM_PATH'] = gem_home, gem_path
     end
 
+    def break_git!
+      FileUtils.mkdir_p(tmp("broken_path"))
+      File.open(tmp("broken_path/git"), "w", 0755) do |f|
+        f.puts "#!/usr/bin/env ruby\nSTDERR.puts 'This is not the git you are looking for'\nexit 1"
+      end
+
+      ENV["PATH"] = "#{tmp("broken_path")}:#{ENV["PATH"]}"
+    end
+
+    def fake_groff!
+      FileUtils.mkdir_p(tmp("fake_groff"))
+      File.open(tmp("fake_groff/groff"), "w", 0755) do |f|
+        f.puts "#!/usr/bin/env ruby\nputs ARGV.inspect\n"
+      end
+
+      ENV["PATH"] = "#{tmp("fake_groff")}:#{ENV["PATH"]}"
+    end
+
+    def kill_path!
+      ENV["PATH"] = ""
+    end
+
     def system_gems(*gems)
       gems = gems.flatten
 
@@ -175,6 +200,19 @@ module Spec
           ENV['GEM_HOME'], ENV['GEM_PATH'] = gem_home, gem_path
           ENV['PATH'] = path
         end
+      end
+    end
+
+    def cache_gems(*gems)
+      gems = gems.flatten
+
+      FileUtils.rm_rf("#{bundled_app}/vendor/cache")
+      FileUtils.mkdir_p("#{bundled_app}/vendor/cache")
+
+      gems.each do |g|
+        path = "#{gem_repo1}/gems/#{g}.gem"
+        raise "OMG `#{path}` does not exist!" unless File.exist?(path)
+        FileUtils.cp(path, "#{bundled_app}/vendor/cache")
       end
     end
 

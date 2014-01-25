@@ -1,22 +1,7 @@
 require "spec_helper"
 
 describe "the lockfile format" do
-
-  def be_with_diff(expected)
-    # Trim the leading spaces
-    spaces = expected[/\A\s+/, 0] || ""
-    expected.gsub!(/^#{spaces}/, '')
-
-    simple_matcher "should be" do |given, m|
-      m.failure_message = "The lockfile did not match what you expected:\n===============\n" << Differ.diff_by_line(expected, given).to_s << "\n===============\n"
-      expected == given
-    end
-  end
-
-  def lockfile_should_be(expected)
-    lock = File.read(bundled_app("Gemfile.lock"))
-    lock.should be_with_diff(expected)
-  end
+  include Bundler::GemHelpers
 
   it "generates a simple lockfile for a single source, gem" do
     install_gemfile <<-G
@@ -32,7 +17,7 @@ describe "the lockfile format" do
           rack (1.0.0)
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         rack
@@ -55,7 +40,7 @@ describe "the lockfile format" do
             rack
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         rack-obama
@@ -78,7 +63,7 @@ describe "the lockfile format" do
             rack
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         rack-obama (>= 1.0)
@@ -128,19 +113,56 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         foo!
     G
   end
 
+  it "does not assplode when a platform specific dependency is present and the Gemfile has not been resolved on that platform" do
+    build_lib "omg", :path => lib_path('omg')
+
+    gemfile <<-G
+      source "file://#{gem_repo1}"
+
+      platforms :#{not_local_tag} do
+        gem "omg", :path => "#{lib_path('omg')}"
+      end
+
+      gem "rack"
+    G
+
+    lockfile <<-L
+      GIT
+        remote: git://github.com/nex3/haml.git
+        revision: 8a2271f
+        specs:
+
+      GEM
+        remote: file://#{gem_repo1}/
+        specs:
+          rack (1.0.0)
+
+      PLATFORMS
+        #{not_local}
+
+      DEPENDENCIES
+        omg!
+        rack
+    L
+
+    bundle "install"
+    should_be_installed "rack 1.0.0"
+  end
+
   it "serializes global git sources" do
     git = build_git "foo"
 
     install_gemfile <<-G
-      git "#{lib_path('foo-1.0')}"
-      gem "foo"
+      git "#{lib_path('foo-1.0')}" do
+        gem "foo"
+      end
     G
 
     lockfile_should_be <<-G
@@ -154,10 +176,10 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
-        foo
+        foo!
     G
   end
 
@@ -181,7 +203,7 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         foo!
@@ -208,7 +230,7 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         foo!
@@ -232,7 +254,7 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         foo!
@@ -262,7 +284,7 @@ describe "the lockfile format" do
             rack
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         actionpack
@@ -300,7 +322,7 @@ describe "the lockfile format" do
           rake (0.8.7)
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         rails
@@ -323,7 +345,7 @@ describe "the lockfile format" do
             rack
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         rack-obama (>= 1.0)
@@ -346,7 +368,7 @@ describe "the lockfile format" do
             rack
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         rack-obama (>= 1.0)
@@ -371,7 +393,7 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         foo
@@ -396,7 +418,7 @@ describe "the lockfile format" do
         specs:
 
       PLATFORMS
-        #{Gem::Platform.local.to_generic}
+        #{generic(Gem::Platform.local)}
 
       DEPENDENCIES
         foo
@@ -423,7 +445,7 @@ describe "the lockfile format" do
       gem "rack"
     G
 
-    platforms = ['java', Gem::Platform.local.to_generic.to_s].sort
+    platforms = ['java', generic(Gem::Platform.local).to_s].sort
 
     lockfile_should_be <<-G
       GEM
@@ -492,5 +514,112 @@ describe "the lockfile format" do
         activesupport
         rack
     G
+  end
+
+  it "does not add duplicate dependencies" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+      gem "rack"
+    G
+
+    lockfile_should_be <<-G
+      GEM
+        remote: file:#{gem_repo1}/
+        specs:
+          rack (1.0.0)
+
+      PLATFORMS
+        ruby
+
+      DEPENDENCIES
+        rack
+    G
+  end
+
+  it "does not add duplicate dependencies with versions" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack", "1.0"
+      gem "rack", "1.0"
+    G
+
+    lockfile_should_be <<-G
+      GEM
+        remote: file:#{gem_repo1}/
+        specs:
+          rack (1.0.0)
+
+      PLATFORMS
+        ruby
+
+      DEPENDENCIES
+        rack (= 1.0)
+    G
+  end
+
+  it "does not add duplicate dependencies in different groups" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack", "1.0", :group => :one
+      gem "rack", "1.0", :group => :two
+    G
+
+    lockfile_should_be <<-G
+      GEM
+        remote: file:#{gem_repo1}/
+        specs:
+          rack (1.0.0)
+
+      PLATFORMS
+        ruby
+
+      DEPENDENCIES
+        rack (= 1.0)
+    G
+  end
+
+  it "raises if two different versions are used" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack", "1.0"
+      gem "rack", "1.1"
+    G
+
+    bundled_app("Gemfile.lock").should_not exist
+    out.should include "rack (= 1.0) and rack (= 1.1)"
+  end
+
+
+  it "raises if two different versions are used" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack"
+      gem "rack", :git => "git://hubz.com"
+    G
+
+    bundled_app("Gemfile.lock").should_not exist
+    out.should include "rack (>= 0) should come from an unspecfied source and git://hubz.com (at master)"
+  end
+
+  it "works correctly with multiple version dependencies" do
+    install_gemfile <<-G
+      source "file://#{gem_repo1}"
+      gem "rack", "> 0.9", "< 1.0"
+    G
+
+    lockfile_should_be <<-G
+      GEM
+        remote: file:#{gem_repo1}/
+        specs:
+          rack (0.9.1)
+
+      PLATFORMS
+        ruby
+
+      DEPENDENCIES
+        rack (> 0.9, < 1.0)
+    G
+
   end
 end

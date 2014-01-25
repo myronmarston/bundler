@@ -1,5 +1,6 @@
 require 'rubygems/dependency'
 require 'bundler/shared_helpers'
+require 'bundler/rubygems_ext'
 
 module Bundler
   class Dependency < Gem::Dependency
@@ -11,9 +12,12 @@ module Bundler
       :ruby    => Gem::Platform::RUBY,
       :ruby_18 => Gem::Platform::RUBY,
       :ruby_19 => Gem::Platform::RUBY,
+      :mri     => Gem::Platform::RUBY,
+      :mri_18  => Gem::Platform::RUBY,
+      :mri_19  => Gem::Platform::RUBY,
       :jruby   => Gem::Platform::JAVA,
       :mswin   => Gem::Platform::MSWIN
-    }
+    }.freeze
 
     def initialize(name, version, options = {}, &blk)
       super(name, version)
@@ -85,6 +89,18 @@ module Bundler
 
     def ruby_19?
       ruby? && RUBY_VERSION >= "1.9"
+    end
+
+    def mri?
+      !mswin? && (!defined?(RUBY_ENGINE) || RUBY_ENGINE == "ruby")
+    end
+
+    def mri_18?
+      mri? && RUBY_VERSION < "1.9"
+    end
+
+    def mri_19?
+      mri? && RUBY_VERSION >= "1.9"
     end
 
     def jruby?

@@ -1,3 +1,5 @@
+require "spec_helper"
+
 describe "The library itself" do
   def check_for_tab_characters(filename)
     failing_lines = []
@@ -22,10 +24,13 @@ describe "The library itself" do
     end
   end
 
-  def be_well_formed
-    simple_matcher("be well formed") do |given, matcher|
-      matcher.failure_message = given.join("\n")
-      given.empty?
+  RSpec::Matchers.define :be_well_formed do
+    failure_message_for_should do |actual|
+      actual.join("\n")
+    end
+
+    match do |actual|
+      actual.empty?
     end
   end
 
@@ -39,5 +44,12 @@ describe "The library itself" do
       end
     end
     error_messages.compact.should be_well_formed
+  end
+
+  it "can still be built" do
+    Dir.chdir(root) do
+      `gem build bundler.gemspec`
+      $?.should == 0
+    end
   end
 end

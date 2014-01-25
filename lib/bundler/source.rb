@@ -71,8 +71,12 @@ module Bundler
       end
 
       def fetch(spec)
-        action = @spec_fetch_map[spec.full_name]
-        action.call if action
+        spec, uri = @spec_fetch_map[spec.full_name]
+        if spec
+          path = download_gem_from_uri(spec, uri)
+          s = Gem::Format.from_file_by_path(path).spec
+          spec.__swap__(s)
+        end
       end
 
       def install(spec)
@@ -86,12 +90,13 @@ module Bundler
         Bundler.ui.info "Installing #{spec.name} (#{spec.version}) "
 
         install_path = Bundler.requires_sudo? ? Bundler.tmp : Gem.dir
-        installer = Gem::Installer.new path,
-          :install_dir         => install_path,
-          :ignore_dependencies => true,
-          :wrappers            => true,
-          :env_shebang         => true,
-          :bin_dir             => "#{install_path}/bin"
+        options = { :install_dir         => install_path,
+                    :ignore_dependencies => true,
+                    :wrappers            => true,
+                    :env_shebang         => true }
+        options.merge!(:bin_dir => "#{install_path}/bin") unless spec.executables.nil? || spec.executables.empty?
+
+        installer = Gem::Installer.new path, options
         installer.install
 
         # SUDO HAX
@@ -99,6 +104,10 @@ module Bundler
           sudo "mkdir -p #{Gem.dir}/gems #{Gem.dir}/specifications"
           sudo "cp -R #{Bundler.tmp}/gems/#{spec.full_name} #{Gem.dir}/gems/"
           sudo "cp -R #{Bundler.tmp}/specifications/#{spec.full_name}.gemspec #{Gem.dir}/specifications/"
+          spec.executables.each do |exe|
+            sudo "mkdir -p #{Gem.bindir}"
+            sudo "cp -R #{Bundler.tmp}/bin/#{exe} #{Gem.bindir}"
+          end
         end
 
         spec.loaded_from = "#{Gem.dir}/specifications/#{spec.full_name}.gemspec"
@@ -138,7 +147,7 @@ module Bundler
       def fetch_specs
         Index.build do |idx|
           idx.use installed_specs
-          idx.use cached_specs if @allow_cached
+          idx.use cached_specs if @allow_cached || @allow_remote
           idx.use remote_specs if @allow_remote
         end
       end
@@ -191,7 +200,6 @@ module Bundler
       def remote_specs
         @remote_specs ||= begin
           idx     = Index.new
-          remotes = self.remotes.map { |uri| uri.to_s }
           old     = Gem.sources
 
           remotes.each do |uri|
@@ -202,12 +210,7 @@ module Bundler
                 next if name == 'bundler'
                 spec = RemoteSpecification.new(name, version, platform, uri)
                 spec.source = self
-                # Temporary hack until this can be figured out better
-                @spec_fetch_map[spec.full_name] = lambda do
-                  path = download_gem_from_uri(spec, uri)
-                  s = Gem::Format.from_file_by_path(path).spec
-                  spec.__swap__(s)
-                end
+                @spec_fetch_map[spec.full_name] = [spec, uri]
                 idx << spec
               end
             end
@@ -254,6 +257,7 @@ module Bundler
     class Path
       attr_reader :path, :options
       # Kind of a hack, but needed for the lock file parser
+      attr_writer   :name
       attr_accessor :version
 
       DEFAULT_GLOB = "{,*/}*.gemspec"
@@ -301,7 +305,7 @@ module Bundler
       end
 
       def eql?(o)
-        Path === o     &&
+        o.instance_of?(Path) &&
         path == o.path &&
         name == o.name &&
         version == o.version
@@ -318,22 +322,7 @@ module Bundler
 
         if File.directory?(path)
           Dir["#{path}/#{@glob}"].each do |file|
-            file = Pathname.new(file)
-            # Eval the gemspec from its parent directory
-            spec = Dir.chdir(file.dirname) do
-              begin
-                Gem::Specification.from_yaml(file.basename)
-                # Raises ArgumentError if the file is not valid YAML
-              rescue ArgumentError, Gem::EndOfYAMLException, Gem::Exception
-                begin
-                  eval(File.read(file.basename), TOPLEVEL_BINDING, file.expand_path.to_s)
-                rescue LoadError
-                  raise GemspecError, "There was a LoadError while evaluating #{file.basename}.\n" +
-                    "Does it try to require a relative path? That doesn't work in Ruby 1.9."
-                end
-              end
-            end
-
+            spec = Bundler.load_gemspec(file)
             if spec
               spec.loaded_from = file.to_s
               spec.source = self
@@ -367,13 +356,28 @@ module Bundler
       end
 
       class Installer < Gem::Installer
-        def initialize(spec)
+        def initialize(spec, options = {})
           @spec              = spec
-          @bin_dir           = "#{Gem.dir}/bin"
+          @bin_dir           = Bundler.requires_sudo? ? "#{Bundler.tmp}/bin" : "#{Gem.dir}/bin"
           @gem_dir           = spec.full_gem_path
-          @wrappers          = true
-          @env_shebang       = true
-          @format_executable = false
+          @wrappers          = options[:wrappers] || true
+          @env_shebang       = options[:env_shebang] || true
+          @format_executable = options[:format_executable] || false
+        end
+
+        def generate_bin
+          return if spec.executables.nil? || spec.executables.empty?
+
+          if Bundler.requires_sudo?
+            FileUtils.mkdir_p("#{Bundler.tmp}/bin") unless File.exist?("#{Bundler.tmp}/bin")
+          end
+          super
+          if Bundler.requires_sudo?
+            Bundler.mkdir_p "#{Gem.dir}/bin"
+            spec.executables.each do |exe|
+              Bundler.sudo "cp -R #{Bundler.tmp}/bin/#{exe} #{Gem.dir}/bin/"
+            end
+          end
         end
       end
 
@@ -421,14 +425,7 @@ module Bundler
 
         gem_file = Dir.chdir(gem_dir){ Gem::Builder.new(spec).build }
 
-        installer = Gem::Installer.new File.join(gem_dir, gem_file),
-          :bin_dir           => "#{Gem.dir}/bin",
-          :wrappers          => true,
-          :env_shebang       => false,
-          :format_executable => false
-
-        installer.instance_eval { @gem_dir = gem_dir }
-
+        installer = Installer.new(spec, :env_shebang => false)
         installer.build_extensions
         installer.generate_bin
       rescue Gem::InvalidSpecificationException => e
@@ -450,7 +447,7 @@ module Bundler
     end
 
     class Git < Path
-      attr_reader :uri, :ref, :options
+      attr_reader :uri, :ref, :options, :submodules
 
       def initialize(options)
         super
@@ -481,7 +478,8 @@ module Bundler
         uri == o.uri         &&
         ref == o.ref         &&
         name == o.name       &&
-        version == o.version
+        version == o.version &&
+        submodules == o.submodules
       end
 
       alias == eql?
@@ -496,7 +494,15 @@ module Bundler
       end
 
       def path
-        Bundler.install_path.join("#{base_name}-#{shortref_for(revision)}")
+        @install_path ||= begin
+          git_scope = "#{base_name}-#{shortref_for(revision)}"
+
+          if Bundler.requires_sudo?
+            Bundler.user_bundle_path.join(Bundler.ruby_scope).join(git_scope)
+          else
+            Bundler.install_path.join(git_scope)
+          end
+        end
       end
 
       def unlock!
@@ -505,7 +511,7 @@ module Bundler
 
       # TODO: actually cache git specs
       def specs
-        if (@allow_remote || @allow_cached) && !@update
+        if allow_git_ops? && !@update
         # Start by making sure the git cache is up to date
           cache
           checkout
@@ -519,31 +525,33 @@ module Bundler
 
         unless @installed
           Bundler.ui.debug "  * Checking out revision: #{ref}"
-          checkout
+          checkout if allow_git_ops?
           @installed = true
         end
         generate_bin(spec)
       end
 
       def load_spec_files
-        super if cache_path.exist?
-      rescue PathError
-        raise PathError, "#{to_s} is not checked out. Please run `bundle install`"
+        super
+      rescue PathError, GitError
+        raise GitError, "#{to_s} is not checked out. Please run `bundle install`"
       end
 
     private
 
       def git(command)
-        if Bundler.requires_sudo?
-          out = %x{sudo -E git #{command}}
-        else
+        if allow_git_ops?
           out = %x{git #{command}}
-        end
 
-        if $? != 0
-          raise GitError, "An error has occurred in git. Cannot complete bundling."
+          if $? != 0
+            raise GitError, "An error has occurred in git when running `git #{command}. Cannot complete bundling."
+          end
+          out
+        else
+          raise GitError, "Bundler is trying to run a `git #{command}` at runtime. You probably need to run `bundle install`. However, " \
+                          "this error message could probably be more useful. Please submit a ticket at http://github.com/carlhuda/bundler/issues " \
+                          "with steps to reproduce as well as the following\n\nCALLER: #{caller.join("\n")}"
         end
-        out
       end
 
       def base_name
@@ -567,16 +575,25 @@ module Bundler
       end
 
       def cache_path
-        @cache_path ||= Bundler.cache.join("git", "#{base_name}-#{uri_hash}")
+        @cache_path ||= begin
+          git_scope = "#{base_name}-#{uri_hash}"
+
+          if Bundler.requires_sudo?
+            Bundler.user_bundle_path.join("cache/git", git_scope)
+          else
+            Bundler.cache.join("git", git_scope)
+          end
+        end
       end
 
       def cache
         if cached?
+          return if has_revision_cached?
           Bundler.ui.info "Updating #{uri}"
           in_cache { git %|fetch --force --quiet "#{uri}" refs/heads/*:refs/heads/*| }
         else
           Bundler.ui.info "Fetching #{uri}"
-          Bundler.mkdir_p(cache_path.dirname)
+          FileUtils.mkdir_p(cache_path.dirname)
           git %|clone "#{uri}" "#{cache_path}" --bare --no-hardlinks|
         end
       end
@@ -587,7 +604,7 @@ module Bundler
           git %|clone --no-checkout "#{cache_path}" "#{path}"|
         end
         Dir.chdir(path) do
-          git "fetch --force --quiet"
+          git "fetch --force --quiet '#{cache_path}'"
           git "reset --hard #{revision}"
 
           if @submodules
@@ -597,8 +614,26 @@ module Bundler
         end
       end
 
+      def has_revision_cached?
+        return unless @revision
+        in_cache { git %|rev-parse --verify --quiet #{@revision}| }
+        true
+      rescue GitError
+        false
+      end
+
+      def allow_git_ops?
+        @allow_remote || @allow_cached
+      end
+
       def revision
-        @revision ||= in_cache { git("rev-parse #{ref}").strip }
+        @revision ||= begin
+          if allow_git_ops?
+            in_cache { git("rev-parse #{ref}").strip }
+          else
+            raise GitError, "The git source #{uri} is not yet checked out. Please run `bundle install` before trying to start your application"
+          end
+        end
       end
 
       def cached?

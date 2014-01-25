@@ -11,6 +11,58 @@ describe "bundle install with gem sources" do
       out.should =~ /no dependencies/
     end
 
+    it "does not make a lockfile if the install fails" do
+      install_gemfile <<-G, :expect_err => true
+        raise StandardError, "FAIL"
+      G
+
+      err.should =~ /FAIL \(StandardError\)/
+      bundled_app("Gemfile.lock").should_not exist
+    end
+
+    it "creates a Gemfile.lock" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack"
+      G
+
+      bundled_app('Gemfile.lock').should exist
+    end
+
+    it "creates lock files based on the Gemfile name" do
+      gemfile bundled_app('OmgFile'), <<-G
+        source "file://#{gem_repo1}"
+        gem "rack", "1.0"
+      G
+
+      bundle 'install --gemfile OmgFile'
+
+      bundled_app("OmgFile.lock").should exist
+    end
+
+    it "doesn't delete the lockfile if one already exists" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem 'rack'
+      G
+
+      lockfile = File.read(bundled_app("Gemfile.lock"))
+
+      install_gemfile <<-G, :expect_err => true
+        raise StandardError, "FAIL"
+      G
+
+      File.read(bundled_app("Gemfile.lock")).should == lockfile
+    end
+
+    it "does not touch the lockfile if nothing changed" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem "rack"
+      G
+
+      lambda { run '1' }.should_not change { File.mtime(bundled_app('Gemfile.lock')) }
+    end
     it "fetches gems" do
       install_gemfile <<-G
         source "file://#{gem_repo1}"
@@ -19,6 +71,34 @@ describe "bundle install with gem sources" do
 
       default_bundle_path("gems/rack-1.0.0").should exist
       should_be_installed("rack 1.0.0")
+    end
+
+    it "fetches gems when multiple versions are specified" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem 'rack', "> 0.9", "< 1.0"
+      G
+
+      default_bundle_path("gems/rack-0.9.1").should exist
+      should_be_installed("rack 0.9.1")
+    end
+
+    it "fetches gems when multiple versions are specified take 2" do
+      install_gemfile <<-G
+        source "file://#{gem_repo1}"
+        gem 'rack', "< 1.0", "> 0.9"
+      G
+
+      default_bundle_path("gems/rack-0.9.1").should exist
+      should_be_installed("rack 0.9.1")
+    end
+
+    it "raises an appropriate error when gems are specified using symbols" do
+      status = install_gemfile(<<-G, :exit_status => true)
+        source "file://#{gem_repo1}"
+        gem :rack
+      G
+      status.should == 4
     end
 
     it "pulls in dependencies" do
@@ -161,6 +241,34 @@ describe "bundle install with gem sources" do
       end
     end
 
+    describe "doing bundle install foo" do
+      before do
+        gemfile <<-G
+          source "file://#{gem_repo1}"
+          gem "rack"
+        G
+      end
+
+      it "works" do
+        bundle "install vendor"
+        should_be_installed "rack 1.0"
+      end
+
+      it "allows running bundle install --system without deleting foo" do
+        bundle "install vendor"
+        bundle "install --system"
+        FileUtils.rm_rf(bundled_app("vendor"))
+        should_be_installed "rack 1.0"
+      end
+
+      it "allows running bundle install --system after deleting foo" do
+        bundle "install vendor"
+        FileUtils.rm_rf(bundled_app("vendor"))
+        bundle "install --system"
+        should_be_installed "rack 1.0"
+      end
+    end
+
     it "finds gems in multiple sources" do
       build_repo2
       update_repo2
@@ -224,7 +332,7 @@ describe "bundle install with gem sources" do
     end
   end
 
-  describe "when BUNDLE_PATH is set" do
+  describe "when BUNDLE_PATH or the global path config is set" do
     before :each do
       build_lib "rack", "1.0.0", :to_system => true do |s|
         s.write "lib/rack.rb", "raise 'FAIL'"
@@ -236,13 +344,44 @@ describe "bundle install with gem sources" do
       G
     end
 
-    it "installs gems to BUNDLE_PATH" do
-      ENV['BUNDLE_PATH'] = bundled_app('vendor').to_s
+    def set_bundle_path(type, location)
+      if type == :env
+        ENV["BUNDLE_PATH"] = location
+      elsif type == :global
+        bundle "config path #{location}", "no-color" => nil
+      end
+    end
 
-      bundle :install
+    [:env, :global].each do |type|
+      it "installs gems to a path if one is specified" do
+        set_bundle_path(type, bundled_app("vendor2").to_s)
+        bundle "install vendor"
 
-      bundled_app('vendor/gems/rack-1.0.0').should be_directory
-      should_be_installed "rack 1.0.0"
+        vendored_gems("gems/rack-1.0.0").should be_directory
+        bundled_app("vendor2").should_not be_directory
+        should_be_installed "rack 1.0.0"
+      end
+
+      it "installs gems to BUNDLE_PATH with #{type}" do
+        set_bundle_path(type, bundled_app("vendor").to_s)
+
+        bundle :install
+
+        bundled_app('vendor/gems/rack-1.0.0').should be_directory
+        should_be_installed "rack 1.0.0"
+      end
+
+      it "installs gems to BUNDLE_PATH relative to root when relative" do
+        set_bundle_path(type, "vendor")
+
+        FileUtils.mkdir_p bundled_app('lol')
+        Dir.chdir(bundled_app('lol')) do
+          bundle :install
+        end
+
+        bundled_app('vendor/gems/rack-1.0.0').should be_directory
+        should_be_installed "rack 1.0.0"
+      end
     end
 
     it "installs gems to BUNDLE_PATH from .bundle/config" do
@@ -251,18 +390,6 @@ describe "bundle install with gem sources" do
       bundle :install
 
       vendored_gems('gems/rack-1.0.0').should be_directory
-      should_be_installed "rack 1.0.0"
-    end
-
-    it "installs gems to BUNDLE_PATH relative to root when relative" do
-      ENV['BUNDLE_PATH'] = 'vendor'
-
-      FileUtils.mkdir_p bundled_app('lol')
-      Dir.chdir(bundled_app('lol')) do
-        bundle :install
-      end
-
-      bundled_app('vendor/gems/rack-1.0.0').should be_directory
       should_be_installed "rack 1.0.0"
     end
 
@@ -297,7 +424,7 @@ describe "bundle install with gem sources" do
     end
   end
 
-  describe "when requesting a quite install via --quiet" do
+  describe "when requesting a quiet install via --quiet" do
     it "should be quiet if there are no warnings" do
       gemfile <<-G
         source "file://#{gem_repo1}"
@@ -323,30 +450,50 @@ describe "bundle install with gem sources" do
       build_gem "rack", "1.0.0", :to_system => true do |s|
         s.write "lib/rack.rb", "puts 'FAIL'"
       end
-    end
 
-    it "does not use available system gems" do
       gemfile <<-G
         source "file://#{gem_repo1}"
         gem "rack"
       G
-
-      bundle "install vendor --disable-shared-gems"
-      should_be_installed "rack 1.0.0"
     end
 
-    it "remembers to disable system gems after the first time" do
-      gemfile <<-G
-        source "file://#{gem_repo1}"
-        gem "rack"
-      G
-
-      bundle "install vendor --disable-shared-gems"
-      FileUtils.rm_rf bundled_app('vendor')
+    it "behaves like bundle install vendor/bundle with --deployment" do
       bundle "install"
-
-      vendored_gems('gems/rack-1.0.0').should be_directory
+      bundle "install --deployment"
+      out.should include("Your bundle was installed to `vendor/bundle`")
       should_be_installed "rack 1.0.0"
+      bundled_app("vendor/bundle").should exist
+    end
+
+    it "prints a warning if you try to use --disable-shared-gems" do
+      bundle "install vendor --disable-shared-gems"
+      out.should include "The disable-shared-gem option is no longer available"
+    end
+
+    ["install vendor", "install --path vendor"].each do |install|
+      it "does not use available system gems with bundle #{install}" do
+        bundle install
+        should_be_installed "rack 1.0.0"
+      end
+
+      it "prints a warning to let the user know what has happened with bundle #{install}" do
+        bundle install
+        out.should include("Your bundle was installed to `vendor`")
+      end
+
+      it "disallows #{install} --system" do
+        bundle "#{install} --system"
+        out.should include("Please choose.")
+      end
+
+      it "remembers to disable system gems after the first time with bundle #{install}" do
+        bundle install
+        FileUtils.rm_rf bundled_app('vendor')
+        bundle "install"
+
+        vendored_gems('gems/rack-1.0.0').should be_directory
+        should_be_installed "rack 1.0.0"
+      end
     end
   end
 

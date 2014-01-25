@@ -27,6 +27,8 @@ module Bundler
             Gem::Platform::MING]
 
     class SpecGroup < Array
+      include GemHelpers
+
       attr_reader :activated, :required_by
 
       def initialize(a)
@@ -52,7 +54,7 @@ module Bundler
 
         @activated.each do |p|
           if s = @specs[p]
-            platform = Gem::Platform.new(s.platform).to_generic
+            platform = generic(Gem::Platform.new(s.platform))
             next if specs[platform]
 
             lazy_spec = LazySpecification.new(name, version, platform, source)
@@ -252,7 +254,13 @@ module Bundler
 
         if matching_versions.empty?
           if current.required_by.empty?
-            if current.source
+            if base = @base[current.name] and !base.empty?
+              version = base.first.version
+              message = "You have requested:\n" \
+                    "  #{current.name} #{current.requirement}\n\n" \
+                    "The bundle currently has #{current.name} locked at #{version}.\n" \
+                    "Try running `bundle update #{current.name}`"
+            elsif current.source
               name = current.name
               versions = @source_requirements[name][name].map { |s| s.version }
               message  = "Could not find gem '#{current}' in #{current.source}.\n"

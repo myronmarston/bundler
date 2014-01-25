@@ -4,12 +4,17 @@ $:.unshift File.expand_path('../../lib', __FILE__)
 require 'fileutils'
 require 'rubygems'
 require 'bundler'
-require 'spec'
+require 'rspec'
 
-begin
-  require 'differ'
-rescue LoadError
-  abort "You need the `differ' gem installed to run the tests"
+# Require the correct version of popen for the current platform
+if RbConfig::CONFIG['host_os'] =~ /mingw|mswin/
+  begin
+    require 'win32/open3'
+  rescue LoadError
+    abort "Run `gem install win32-open3` to be able to run specs"
+  end
+else
+  require 'open3'
 end
 
 Dir["#{File.expand_path('../support', __FILE__)}/*.rb"].each do |file|
@@ -19,13 +24,11 @@ end
 $debug    = false
 $show_err = true
 
-Differ.format = :color
-
 Spec::Rubygems.setup
 FileUtils.rm_rf(Spec::Path.gem_repo1)
 ENV['RUBYOPT'] = "-I#{Spec::Path.root}/spec/support/rubygems_hax"
 
-Spec::Runner.configure do |config|
+RSpec.configure do |config|
   config.include Spec::Builders
   config.include Spec::Helpers
   config.include Spec::Indexes
@@ -34,6 +37,9 @@ Spec::Runner.configure do |config|
   config.include Spec::Rubygems
   config.include Spec::Platforms
   config.include Spec::Sudo
+
+  config.filter_run :focus => true
+  config.run_all_when_everything_filtered = true
 
   original_wd       = Dir.pwd
   original_path     = ENV['PATH']
@@ -67,7 +73,9 @@ Spec::Runner.configure do |config|
     ENV['BUNDLE_PATH']    = nil
     ENV['BUNDLE_GEMFILE'] = nil
     ENV['BUNDLER_TEST']   = nil
+    ENV['BUNDLE_FROZEN']  = nil
     ENV['BUNDLER_SPEC_PLATFORM'] = nil
-    ENV['BUNDLER_SPEC_VERSION'] = nil
+    ENV['BUNDLER_SPEC_VERSION']  = nil
+    ENV['BUNDLE_APP_CONFIG']     = nil
   end
 end

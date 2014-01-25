@@ -134,7 +134,15 @@ class Thor
       #
       def parse_boolean(switch)
         if current_is_value?
-          ["true", "TRUE", "t", "T", true].include?(shift)
+          if ["true", "TRUE", "t", "T", true].include?(peek)
+            shift
+            true
+          elsif ["false", "FALSE", "f", "F", false].include?(peek)
+            shift
+            false
+          else
+            true
+          end
         else
           @switches.key?(switch) || !no_or_skip?(switch)
         end
@@ -150,7 +158,9 @@ class Thor
             return nil # User set value to nil
           elsif option.string? && !option.required?
             # Return the default if there is one, else the human name
-            return option.default || option.human_name
+            return option.lazy_default || option.default || option.human_name
+          elsif option.lazy_default
+            return option.lazy_default
           else
             raise MalformattedArgumentError, "No value provided for option '#{switch}'"
           end

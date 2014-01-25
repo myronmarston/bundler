@@ -8,9 +8,30 @@ describe "bundle show" do
     G
   end
 
+  it "creates a Gemfile.lock if one did not exist" do
+    FileUtils.rm("Gemfile.lock")
+
+    bundle "show"
+
+    bundled_app("Gemfile.lock").should exist
+  end
+
+  it "creates a Gemfile.lock if one did not exist and we're doing bundle show rails" do
+    FileUtils.rm("Gemfile.lock")
+
+    bundle "show rails"
+
+    bundled_app("Gemfile.lock").should exist
+  end
+
   it "prints path if gem exists in bundle" do
     bundle "show rails"
     out.should == default_bundle_path('gems', 'rails-2.3.2').to_s
+  end
+
+  it "prints the path to the running bundler" do
+    bundle "show bundler"
+    out.should == File.expand_path('../../../', __FILE__)
   end
 
   it "complains if gem not in bundle" do

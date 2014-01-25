@@ -5,6 +5,13 @@ module Bundler
     def initialize(root, definition)
       @root = root
       @definition = definition
+
+      env_file = Bundler.app_config_path.join('environment.rb')
+      env_file.rmtree if env_file.exist?
+    end
+
+    def inspect
+      @definition.to_lock.inspect
     end
 
     # TODO: Remove this method. It's used in cli.rb still
@@ -29,12 +36,7 @@ module Bundler
     end
 
     def lock
-      env_file = root.join('.bundle/environment.rb')
-      env_file.rmtree if env_file.exist?
-
-      File.open(root.join('Gemfile.lock'), 'w') do |f|
-        f.puts @definition.to_lock
-      end
+      @definition.lock(Bundler.default_lockfile)
     end
 
     def update(*gems)
